@@ -5,7 +5,15 @@ struct ThroughputSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            SectionLabel("Throughput")
+            HStack {
+                SectionLabel("Throughput")
+                Spacer()
+                if state.linkSpeed > 0 {
+                    Text("Link \(Int(state.linkSpeed)) Mbps")
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                }
+            }
 
             HStack(spacing: 20) {
                 speedColumn(direction: "↑", bytes: state.uploadBytesPerSec, color: .blue)
@@ -13,10 +21,14 @@ struct ThroughputSection: View {
                 Spacer()
             }
 
-            if state.linkSpeed > 0 {
-                Text("Link \(Int(state.linkSpeed)) Mbps")
-                    .font(.system(size: 10))
-                    .foregroundColor(.secondary)
+            if state.downloadHistory.count >= 4 {
+                DualSparkline(
+                    uploadValues: state.uploadHistory.values,
+                    downloadValues: state.downloadHistory.values,
+                    height: 32
+                )
+                .background(Color.primary.opacity(0.02))
+                .cornerRadius(4)
             }
         }
     }

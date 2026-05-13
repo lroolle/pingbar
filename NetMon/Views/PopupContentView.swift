@@ -2,6 +2,7 @@ import SwiftUI
 
 struct PopupContentView: View {
     @EnvironmentObject var state: NetworkState
+    @State private var copiedReport = false
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
@@ -29,10 +30,16 @@ struct PopupContentView: View {
                 Divider().padding(.horizontal, 16)
                 section { SpeedTestSection() }
 
+                if !state.speedTestHistory.isEmpty {
+                    Divider().padding(.horizontal, 16)
+                    section { SpeedTestHistorySection() }
+                }
+
                 footer
             }
         }
         .frame(width: 320)
+        .onAppear { state.loadSpeedTestHistory() }
     }
 
     private func section<Content: View>(@ViewBuilder content: () -> Content) -> some View {
@@ -43,18 +50,50 @@ struct PopupContentView: View {
     }
 
     private var footer: some View {
-        HStack {
-            Text("PingBar")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundColor(.secondary)
-            Spacer()
-            Button("Quit") { NSApp.terminate(nil) }
-                .buttonStyle(.plain)
+        HStack(spacing: 12) {
+            Button(action: copyDiagnostic) {
+                HStack(spacing: 3) {
+                    Image(systemName: copiedReport ? "checkmark" : "doc.on.clipboard")
+                    Text(copiedReport ? "Copied" : "Copy Report")
+                }
                 .font(.system(size: 10))
-                .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(copiedReport ? .green : .secondary)
+
+            Button(action: detachWindow) {
+                HStack(spacing: 3) {
+                    Image(systemName: "pin")
+                    Text("Pin")
+                }
+                .font(.system(size: 10))
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(.secondary)
+
+            Spacer()
+
+            Text("PingBar")
+                .font(.system(size: 9))
+                .foregroundColor(.quaternaryLabelColor)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
+    }
+
+    private func copyDiagnostic() {
+        let report = state.diagnosticReport()
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(report, forType: .string)
+        withAnimation(.snappy) { copiedReport = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            withAnimation(.snappy) { copiedReport = false }
+        }
+    }
+
+    private func detachWindow() {
+        AppDelegate.shared?.popover.performClose(nil)
+        FloatingWindowController.shared.show(state: state)
     }
 }
 
@@ -87,5 +126,11 @@ struct StatusHeader: View {
         case .poor:     return .red
         case .unknown:  return .gray
         }
+    }
+}
+
+private extension Color {
+    static var quaternaryLabelColor: Color {
+        Color(nsColor: .quaternaryLabelColor)
     }
 }

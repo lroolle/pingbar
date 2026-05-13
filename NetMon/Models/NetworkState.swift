@@ -30,6 +30,11 @@ final class NetworkState: ObservableObject {
     @Published var speedTestError: String?
 
     @Published var activeWarnings: [Warning] = []
+    @Published var speedTestHistory: [SpeedTestHistoryEntry] = []
+
+    var downloadHistory = HistoryBuffer<Double>(capacity: 300)
+    var uploadHistory = HistoryBuffer<Double>(capacity: 300)
+    var latencyHistory: [String: HistoryBuffer<Double>] = [:]
 
     let config = AppConfig.shared
 
@@ -129,6 +134,8 @@ final class NetworkState: ObservableObject {
                 guard let self else { return }
                 self.uploadBytesPerSec = sample.upload
                 self.downloadBytesPerSec = sample.download
+                self.downloadHistory.append(Double(sample.download))
+                self.uploadHistory.append(Double(sample.upload))
                 if sample.linkSpeed > 0 { self.linkSpeed = sample.linkSpeed }
             }
         }
@@ -147,8 +154,15 @@ final class NetworkState: ObservableObject {
                 DispatchQueue.main.async {
                     guard let self else { return }
                     var result = self.pingResults[host] ?? PingResult(id: host, host: host, label: label)
-                    if let ms { result.record(latency: ms) }
-                    else { result.recordTimeout() }
+                    if let ms {
+                        result.record(latency: ms)
+                        if self.latencyHistory[host] == nil {
+                            self.latencyHistory[host] = HistoryBuffer<Double>(capacity: 150)
+                        }
+                        self.latencyHistory[host]?.append(ms)
+                    } else {
+                        result.recordTimeout()
+                    }
                     self.pingResults[host] = result
                 }
             }
@@ -207,8 +221,10 @@ final class NetworkState: ObservableObject {
             do {
                 let result = try await runner.run(preset: preset, noProxy: noProxy)
                 await MainActor.run { [weak self] in
-                    self?.speedTestResult = result
-                    self?.isSpeedTestRunning = false
+                    guard let self else { return }
+                    self.speedTestResult = result
+                    self.isSpeedTestRunning = false
+                    self.saveSpeedTestResult(result, preset: preset, noProxy: noProxy)
                 }
             } catch {
                 await MainActor.run { [weak self] in
@@ -242,5 +258,92 @@ final class NetworkState: ObservableObject {
             hosts.append((h.address, h.label))
         }
         return hosts
+    }
+
+    private func saveSpeedTestResult(_ result: NativeSpeedResult, preset: SpeedTestPreset, noProxy: Bool) {
+        let entry = SpeedTestHistoryEntry(
+            date: Date(),
+            preset: preset.rawValue,
+            noProxy: noProxy,
+            server: result.server,
+            location: result.location,
+            latencyMs: result.latencyMs,
+            downloadBps: result.downloadBps,
+            uploadBps: result.uploadBps
+        )
+        speedTestHistory.insert(entry, at: 0)
+        if speedTestHistory.count > 20 { speedTestHistory = Array(speedTestHistory.prefix(20)) }
+
+        if let data = try? JSONEncoder().encode(speedTestHistory) {
+            UserDefaults.standard.set(data, forKey: "speedTestHistory")
+        }
+    }
+
+    func loadSpeedTestHistory() {
+        guard let data = UserDefaults.standard.data(forKey: "speedTestHistory"),
+              let history = try? JSONDecoder().decode([SpeedTestHistoryEntry].self, from: data)
+        else { return }
+        speedTestHistory = history
+    }
+
+    func diagnosticReport() -> String {
+        var lines: [String] = []
+        lines.append("PingBar Diagnostic Report")
+        lines.append("Generated: \(ISO8601DateFormatter().string(from: Date()))")
+        lines.append("")
+
+        lines.append("== Network Health: \(health.label) ==")
+        if !activeWarnings.isEmpty {
+            for w in activeWarnings {
+                lines.append("  [\(w.severity)] \(w.title)")
+            }
+        }
+        lines.append("")
+
+        lines.append("== Throughput ==")
+        lines.append("  Download: \(Fmt.throughputCompact(downloadBytesPerSec))")
+        lines.append("  Upload:   \(Fmt.throughputCompact(uploadBytesPerSec))")
+        if linkSpeed > 0 { lines.append("  Link:     \(Int(linkSpeed)) Mbps") }
+        lines.append("")
+
+        lines.append("== Latency ==")
+        for host in allPingHostOrder {
+            if let ping = pingResults[host] {
+                let lat = Fmt.latency(ping.latencyMs)
+                let loss = Fmt.packetLoss(ping.packetLoss)
+                let jit = ping.jitterMs.map { String(format: "%.1fms", $0) } ?? "--"
+                lines.append("  \(ping.label) (\(host)): \(lat) jitter=\(jit) loss=\(loss)")
+            }
+        }
+        lines.append("")
+
+        if let wifi = wifiInfo {
+            lines.append("== WiFi ==")
+            if let ssid = wifi.ssid { lines.append("  SSID:     \(ssid)") }
+            if let ch = wifi.channel, let band = wifi.channelBand, let width = wifi.channelWidth {
+                lines.append("  Channel:  \(ch) (\(band), \(width))")
+            }
+            if let phy = wifi.phyMode { lines.append("  Standard: \(phy)") }
+            if let rssi = wifi.rssi { lines.append("  Signal:   \(rssi) dBm") }
+            if let snr = wifi.snr { lines.append("  SNR:      \(snr) dB") }
+            if let rate = wifi.transmitRate { lines.append("  Tx Rate:  \(Int(rate)) Mbps") }
+            lines.append("")
+        }
+
+        lines.append("== Network ==")
+        lines.append("  Proxy:    \(proxyStatus.summary)")
+        if let ip = directIP { lines.append("  Direct IP: \(ip)") }
+        if let ip = proxyIP, ip != directIP { lines.append("  Proxy IP:  \(ip)") }
+        lines.append("")
+
+        if let result = speedTestResult {
+            lines.append("== Last Speed Test ==")
+            lines.append("  Server:   \(result.server) (\(result.location))")
+            lines.append("  Latency:  \(Fmt.latency(result.latencyMs))")
+            if result.downloadBps > 0 { lines.append("  Download: \(Fmt.bitsPerSec(result.downloadBps))") }
+            if result.uploadBps > 0 { lines.append("  Upload:   \(Fmt.bitsPerSec(result.uploadBps))") }
+        }
+
+        return lines.joined(separator: "\n")
     }
 }

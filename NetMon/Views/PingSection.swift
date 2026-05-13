@@ -2,6 +2,7 @@ import SwiftUI
 
 struct PingSection: View {
     @EnvironmentObject var state: NetworkState
+    @State private var expandedHost: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -9,13 +10,28 @@ struct PingSection: View {
 
             ForEach(state.allPingHostOrder, id: \.self) { host in
                 if let ping = state.pingResults[host] {
-                    pingRow(ping)
+                    VStack(spacing: 2) {
+                        pingRow(host: host, result: ping)
+
+                        if expandedHost == host,
+                           let history = state.latencyHistory[host],
+                           history.count >= 4 {
+                            Sparkline(
+                                values: history.values,
+                                color: statusColor(ping),
+                                height: 24
+                            )
+                            .background(Color.primary.opacity(0.02))
+                            .cornerRadius(3)
+                            .padding(.leading, 12)
+                        }
+                    }
                 }
             }
         }
     }
 
-    private func pingRow(_ result: PingResult) -> some View {
+    private func pingRow(host: String, result: PingResult) -> some View {
         HStack(spacing: 0) {
             Circle()
                 .fill(statusColor(result))
@@ -48,6 +64,12 @@ struct PingSection: View {
                     .frame(width: 35, alignment: .trailing)
             } else {
                 Spacer().frame(width: 35)
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            withAnimation(.snappy(duration: 0.2)) {
+                expandedHost = expandedHost == host ? nil : host
             }
         }
     }
