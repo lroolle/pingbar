@@ -1,0 +1,44 @@
+name: NetMon
+options:
+  bundleIdPrefix: com.lroolle
+  deploymentTarget:
+    macOS: "13.0"
+  xcodeVersion: "16.0"
+  generateEmptyDirectories: true
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MACOSX_DEPLOYMENT_TARGET: "13.0"
+
+targets:
+  NetMon:
+    type: application
+    platform: macOS
+    sources:
+      - path: NetMon
+        excludes:
+          - "Resources/NetMon.entitlements"
+    info:
+      path: NetMon/Resources/Info.plist
+      properties:
+        LSUIElement: true
+        NSPrincipalClass: NSApplication
+        NSLocationWhenInUseUsageDescription: "PingBar needs location access to read WiFi network names on macOS 14+."
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        CFBundleDisplayName: PingBar
+        LSApplicationCategoryType: public.app-category.utilities
+    entitlements:
+      path: NetMon/Resources/NetMon.entitlements
+    settings:
+      base:
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_STYLE: Manual
+        PRODUCT_BUNDLE_IDENTIFIER: com.lroolle.pingbar
+        PRODUCT_NAME: PingBar
+        ENABLE_HARDENED_RUNTIME: true
+        INFOPLIST_FILE: NetMon/Resources/Info.plist
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks"
+    dependencies: []
