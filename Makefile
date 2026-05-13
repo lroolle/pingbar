@@ -6,12 +6,12 @@ project:
 	xcodegen generate
 
 build: project
-	xcodebuild -project NetMon.xcodeproj -scheme NetMon -configuration Debug \
+	xcodebuild -project PingBar.xcodeproj -scheme PingBar -configuration Debug \
 		CONFIGURATION_BUILD_DIR=$(BUILD_DIR) build
 
 run: build
-	open $(BUILD_DIR)/NetMon.app
+	open $(BUILD_DIR)/PingBar.app
 
 clean:
-	xcodebuild -project NetMon.xcodeproj -scheme NetMon clean
+	xcodebuild -project PingBar.xcodeproj -scheme PingBar clean
 	rm -rf $(BUILD_DIR)
