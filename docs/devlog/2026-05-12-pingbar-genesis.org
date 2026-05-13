@@ -1,0 +1,270 @@
+* [2026-05-12] PingBar genesis: from idea to working menu bar app    :ARCH:FEAT:
+
+** Tension
+
+WiFi at the office (Netis-RD) is unstable. iPhone hotspot works
+fine. We already built speedtestcli (Go CLI, v0.2.0, ships
+--no-proxy for A/B proxy testing). But there's no persistent way
+to watch the network — you run a test, get a number, and the
+moment passes. No trend, no history, no always-visible indicator.
+
+The ask: a macOS menu bar app that shows network health at a glance,
+exposes real diagnostics (throughput, latency, WiFi, proxy), and
+can run speed tests on demand. Something to leave running while you
+work, something that builds evidence for the IT conversation.
+
+** Observation
+
+We surveyed the landscape before writing code:
+
+- *exelban/stats* (37k stars): Full system monitor. Uses
+  NSStatusBar.system.statusItem() in AppDelegate with static func
+  main(). Module system with Reader<T> base class, per-module
+  NSStatusItem, popup windows. Massive codebase. Network module
+  uses getifaddrs for throughput, CWWiFiClient for WiFi, CFSocket
+  raw ICMP for ping. Proven pattern, but too heavy to fork — tight
+  coupling across Kit/, Modules/, Widgets/.
+
+- *bornexplorer/OnlineIndicator*: SwiftUI + AppKit hybrid. Uses
+  NSStatusBar in AppDelegate, NSMenu for dropdown. Connectivity
+  checker via HTTP to captive.apple.com. Good UX reference for
+  live status icons. Key learning: uses a Main.storyboard to wire
+  the AppDelegate — this matters.
+
+- *elegracer/NetSpeedMonitor*: Minimal SwiftUI MenuBarExtra with
+  getifaddrs. 4 files. Used .menuBarExtraStyle(.menu). Key
+  learning: MenuBarExtra works for simple cases.
+
+- *nolze/tiny-wifi-analyzer*: Python + CoreWLAN. Scans nearby SSIDs
+  with RSSI/channel/width. Useful for the diagnostics angle.
+
+** Decision
+
+The big pivot chain, in order:
+
+*** Attempt 1: SwiftUI MenuBarExtra (.window style)
+
+Wrote a full SwiftUI app with @main struct, MenuBarExtra, rich
+popup content. Built and ran — nothing appeared. No error, no
+crash, just silence.
+
+Why it failed: .menuBarExtraStyle(.window) is fragile. Combined
+with an AppDelegate that calls setActivationPolicy(.accessory), it
+conflicts with SwiftUI's lifecycle management. The .window style
+works on some macOS versions but not reliably on macOS 26 (Tahoe
+beta).
+
+Rejected: Debugging MenuBarExtra internals further. It's a black
+box with no diagnostic path.
+
+*** Attempt 2: SwiftUI MenuBarExtra (.menu style)
+
+Switched to .menuBarExtraStyle(.menu). This limits the dropdown
+to Button/Toggle/Text — no rich SwiftUI layout. Added a "Show
+Details" button that opens a separate NSPanel window.
+
+Why it failed: Same problem. The MenuBarExtra item existed (we
+could verify via code) but nothing rendered in the menu bar.
+
+Rejected: Continuing with MenuBarExtra at all.
+
+*** Attempt 3: @main struct with static func main()
+
+Copied Stats' exact pattern: @main struct with static func main()
+that creates NSApplication.shared, sets delegate, calls app.run().
+NSStatusItem created in applicationDidFinishLaunching.
+
+Why it failed: Process ran, applicationDidFinishLaunching fired
+(confirmed via NSLog), status item created (confirmed via NSLog
+showing non-nil button), but NOTHING visible in the menu bar.
+
+This was the most frustrating phase. Every diagnostic said "it
+works" but no pixels appeared.
+
+*** Attempt 4: Storyboard-based entry point
+
+Tried adding a Main.storyboard like Barmaid uses. The storyboard
+wires NSApplication -> delegate connection.
+
+Why it failed: Hand-written storyboard XML crashed ibtool with an
+internal exception. IB XML is not meant to be written by hand.
+
+Rejected: Maintaining storyboard files from CLI.
+
+*** The breakthrough: NSApp.setActivationPolicy(.accessory)
+
+Going back to Stats' source, found that it explicitly calls
+NSApp.setActivationPolicy(.accessory) in applicationDidFinishLaunching.
+We had LSUIElement=true in Info.plist, which theoretically does
+the same thing — but on macOS 26, the explicit runtime call is
+apparently required.
+
+Added the call. Status item appeared — but empty. No title or image
+rendered.
+
+Fix: Changed from NSStatusItem.variableLength to a fixed width of
+120pt. Title appeared. Then switched back to variableLength with
+plain ASCII title instead of attributed text. Worked.
+
+Root cause (probable): On macOS 26 with the Liquid Glass UI
+redesign, NSStatusItem with variableLength and attributed text
+containing unicode arrows rendered at zero width. Plain text with
+standard font works. This is likely a macOS 26 beta bug.
+
+*** Architecture: NSStatusBar + NSPopover (final)
+
+Following Barmaid's pattern exactly:
+- @main class AppDelegate with static func main()
+- NSStatusBar.system.statusItem() for menu bar presence
+- NSPopover for left-click content (SwiftUI via NSHostingController)
+- NSMenu for right-click context menu
+- NSApp.setActivationPolicy(.accessory) called explicitly
+
+This is the proven pattern that both Stats and Barmaid use.
+MenuBarExtra is rejected permanently for this project.
+
+*** Pivot: Go CLI wrapper -> Native Swift
+
+The initial SpeedTestRunner shelled out to the speedtestcli Go
+binary via Process(). This worked for local dev but is a hard
+blocker for App Store:
+
+- App Sandbox forbids Process() calls to external binaries
+- PingReader used /sbin/ping via Process()
+- WiFiReader used the airport command as an SSID fallback
+
+Replaced all three:
+- SpeedTestRunner: Native URLSession against Cloudflare's public
+  speed test endpoints (/__down, /__up, /meta). Same protocol the
+  Go CLI uses, implemented in ~200 lines of Swift.
+- PingReader: URLSession HEAD request timing. Not ICMP, but
+  measures real-world HTTP latency which is more representative
+  for most users.
+- WiFiReader: CoreWLAN only, dropped the airport -I fallback.
+
+This eliminated all Process() calls. The app is now fully
+sandbox-compatible.
+
+*** Design review (Linus-style)
+
+Called a code review that found 4 critical bugs:
+
+1. Pipe deadlock in SpeedTestRunner — waitUntilExit() before
+   readDataToEndOfFile(). Would hang if output exceeded 64KB.
+   (Became moot when we went native, but was a real bug.)
+
+2. Data race on Process reference — accessed from UI thread
+   (cancel) and background thread (run) with no sync.
+   (Also moot after native rewrite, but prompted adding a
+   serial dispatch queue pattern.)
+
+3. UInt32 counter wrap in ThroughputReader — ifi_obytes wraps
+   at 4GB. On gigabit, that's every ~34 seconds. The max(0)
+   clamp gave false zero readings. Fixed with proper wrap-around
+   delta computation.
+
+4. Dead code — speedTestBinaryPath setting was stored but never
+   read by the runner. Fixed in native rewrite by reading from
+   UserDefaults directly.
+
+*** Naming
+
+NetMon -> PingBar. "NetMon" is functional but forgettable.
+"PingBar" hooks on the most relatable network concept (latency)
+and the form factor (menu bar). The app does more than ping, but
+like "Flighty" does more than track flights — under-promise,
+over-deliver.
+
+** Tradeoff
+
+- *HTTP HEAD vs ICMP ping*: We measure HTTP round-trip, not ICMP
+  latency. This is ~2-5ms higher due to TCP+HTTP overhead. For
+  the use case (detecting degradation, not measuring absolute
+  latency), this is acceptable. But a network engineer expecting
+  ICMP numbers will see higher values. If we ever want true ICMP,
+  we'd need the com.apple.developer.networking.custom-protocol
+  entitlement (restricted, requires Apple approval).
+
+- *Cloudflare-only speed test*: The native speed test only uses
+  Cloudflare's endpoints. The Go CLI had Ookla too. Adding Ookla
+  natively would require reverse-engineering their API or
+  embedding the speedtest-go library (can't — it's Go). For most
+  users, Cloudflare is sufficient and more consistent.
+
+- *No storyboard/XIB*: We bootstrap entirely in code via static
+  func main(). This works but means we can't use IB for any UI.
+  For a menu bar app with SwiftUI popover content, this is fine.
+  But if we ever need complex AppKit UI (multi-window settings,
+  custom menu items with embedded views), we might want to add
+  a storyboard back — created from Xcode, not hand-written.
+
+- *ObservableObject, not @Observable*: We target macOS 13+, so
+  we use the older @Published/ObservableObject pattern. @Observable
+  (macOS 14+) is cleaner but raising the deployment target would
+  cut off Ventura users.
+
+- *No app icon yet*: Ships with default blank icon. Need a proper
+  1024x1024 for App Store.
+
+** Next
+
+The live wire is the popover UX. It works but it's dense — all
+sections rendered at once, no progressive disclosure. The warning
+banner causes layout shifts when warnings appear/disappear. The
+sparklines are in but untested on real data over time.
+
+The most likely next failure: the native speed test hitting
+Cloudflare's rate limits or getting blocked. The Go CLI sends
+proper headers and follows the exact protocol; our native
+implementation might trip anti-abuse measures. Test with repeated
+runs.
+
+For App Store: need Apple Developer account, proper code signing,
+app icon, privacy policy, screenshots. The code is sandbox-ready
+but the signing/submission pipeline isn't.
+
+** Artifacts
+
+Repository: https://github.com/lroolle/pingbar
+3 commits, 29 Swift files, 2496 lines of code.
+
+File structure:
+#+begin_example
+PingBar/
+  App/AppDelegate.swift              NSStatusBar + NSPopover + Combine label
+  Models/
+    AppConfig.swift                  Centralized prefs (hosts, intervals, display)
+    NetworkState.swift               Central state, reader orchestration, history
+    HistoryBuffer.swift              Generic ring buffer for trends
+    PingResult.swift                 Per-host rolling latency stats
+    SpeedTestHistory.swift           Codable entry for persistence
+    ProxyStatus.swift, Warning.swift, WiFiInfo.swift, ThroughputSample.swift
+  Readers/
+    ThroughputReader.swift           getifaddrs with UInt32 wrap handling
+    PingReader.swift                 URLSession HEAD timing (sandbox-safe)
+    WiFiReader.swift                 CoreWLAN (SSID, RSSI, channel, PHY)
+    ProxyReader.swift                CFNetwork + env + running apps
+    PublicIPReader.swift             Dual session (direct vs proxy) IP fetch
+    SpeedTestRunner.swift            Native Cloudflare speed test
+  Services/
+    WarningEngine.swift              Pure threshold evaluator
+    Formatter.swift                  Fmt enum for bytes, bits, latency, loss
+  Views/
+    DesignSystem.swift               SectionLabel, InfoLabel, InfoValue
+    PopupContentView.swift           Status header, sections, footer actions
+    Sparkline.swift                  Canvas-based charts (single + dual)
+    FloatingWindowController.swift   NSPanel for pinned window
+    ThroughputSection, PingSection, WiFiSection, ProxySection,
+    SpeedTestSection, SpeedTestHistorySection, WarningBanner,
+    SettingsView
+  Utilities/
+    PrimaryInterface.swift           SCDynamicStore interface/gateway lookup
+  Resources/
+    Info.plist, PingBar.entitlements, Assets.xcassets
+#+end_example
+
+Key references studied:
+- exelban/stats (architecture, NSStatusBar pattern, getifaddrs, CoreWLAN)
+- stevenselcuk/Barmaid (NSPopover pattern, click handling)
+- bornexplorer/OnlineIndicator (connectivity checker, SSID fallback)
+- elegracer/NetSpeedMonitor (MenuBarExtra — rejected but informed)
