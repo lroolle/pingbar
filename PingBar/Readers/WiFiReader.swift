@@ -1,3 +1,4 @@
+import Foundation
 import CoreWLAN
 import CoreLocation
 
@@ -25,7 +26,7 @@ final class WiFiReader: NSObject, CLLocationManagerDelegate {
         guard let iface = wifiClient.interface(withName: ifName) else { return nil }
 
         var info = WiFiInfo()
-        info.ssid = iface.ssid()
+        info.ssid = ssid(for: iface)
         info.bssid = iface.bssid()
         info.rssi = iface.rssiValue()
         info.noise = iface.noiseMeasurement()
@@ -39,11 +40,30 @@ final class WiFiReader: NSObject, CLLocationManagerDelegate {
             info.channelWidth = widthString(ch.channelWidth)
         }
 
-        if info.ssid == "<redacted>" {
-            info.ssid = nil
+        return info
+    }
+
+    private func ssid(for interface: CWInterface) -> String? {
+        if let ssid = cleanSSID(interface.ssid()) {
+            return ssid
         }
 
-        return info
+        guard let configuration = interface.configuration(),
+              let profiles = configuration.value(forKey: "networkProfiles") as? NSOrderedSet,
+              let first = profiles.firstObject as? CWNetworkProfile
+        else { return nil }
+
+        return cleanSSID(first.ssid)
+    }
+
+    private func cleanSSID(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let cleaned = value
+            .replacingOccurrences(of: "’", with: "'")
+            .replacingOccurrences(of: "‘", with: "'")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty, cleaned != "<redacted>" else { return nil }
+        return cleaned
     }
 
     private func phyModeString(_ mode: CWPHYMode) -> String {
@@ -96,6 +116,8 @@ final class WiFiReader: NSObject, CLLocationManagerDelegate {
         case .enterprise:         return "Enterprise"
         case .dynamicWEP:         return "Dynamic WEP"
         case .wpaEnterpriseMixed: return "WPA Enterprise Mixed"
+        case .OWE:                return "OWE"
+        case .oweTransition:      return "OWE Transition"
         case .unknown:            return "unknown"
         @unknown default:         return "unknown (\(sec.rawValue))"
         }

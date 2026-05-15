@@ -14,7 +14,10 @@ struct PopupContentView: View {
                     .padding(.bottom, 8)
 
                 if !state.activeWarnings.isEmpty {
-                    WarningBanner(warnings: state.activeWarnings)
+                    WarningBanner(
+                        warnings: state.activeWarnings,
+                        clearAction: { state.clearWarnings() }
+                    )
                         .padding(.horizontal, 16)
                         .padding(.bottom, 8)
                 }
@@ -35,10 +38,14 @@ struct PopupContentView: View {
                     section { SpeedTestHistorySection() }
                 }
 
+                Divider().padding(.horizontal, 16)
+                section { NetworkProcessesSection() }
+
                 footer
             }
         }
-        .frame(width: 320)
+        .frame(width: 360)
+        .background(.regularMaterial)
         .onAppear { state.loadSpeedTestHistory() }
     }
 
@@ -71,6 +78,16 @@ struct PopupContentView: View {
             .buttonStyle(.plain)
             .foregroundColor(.secondary)
 
+            Button(action: openSettings) {
+                HStack(spacing: 3) {
+                    Image(systemName: "gearshape")
+                    Text("Settings")
+                }
+                .font(.system(size: 10))
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(.secondary)
+
             Spacer()
 
             Text("PingBar")
@@ -85,9 +102,9 @@ struct PopupContentView: View {
         let report = state.diagnosticReport()
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(report, forType: .string)
-        withAnimation(.snappy) { copiedReport = true }
+        withAnimation(.easeInOut(duration: 0.18)) { copiedReport = true }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            withAnimation(.snappy) { copiedReport = false }
+            withAnimation(.easeInOut(duration: 0.18)) { copiedReport = false }
         }
     }
 
@@ -95,28 +112,69 @@ struct PopupContentView: View {
         AppDelegate.shared?.popover.performClose(nil)
         FloatingWindowController.shared.show(state: state)
     }
+
+    private func openSettings() {
+        AppDelegate.shared?.popover.performClose(nil)
+        AppDelegate.shared?.showSettingsWindow()
+    }
 }
 
 struct StatusHeader: View {
     @EnvironmentObject var state: NetworkState
 
     var body: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(healthColor)
-                .frame(width: 10, height: 10)
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 8) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(healthColor.opacity(0.14))
+                        .frame(width: 26, height: 26)
+                    Image(systemName: "waveform.path.ecg")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(healthColor)
+                }
 
-            Text(state.health.label)
-                .font(.system(size: 13, weight: .semibold))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("PingBar")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text(state.health.label)
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                }
 
-            Spacer()
+                Spacer()
 
-            if let wifi = state.wifiInfo, let ssid = wifi.ssid {
-                Label(ssid, systemImage: "wifi")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
+                Circle()
+                    .fill(healthColor)
+                    .frame(width: 8, height: 8)
+            }
+
+            HStack(spacing: 8) {
+                if let wifi = state.wifiInfo, let ssid = wifi.ssid {
+                    headerPill(ssid, systemImage: "wifi")
+                }
+                if let iface = state.cachedInterfaceLabel ?? state.cachedInterface {
+                    headerPill(iface, systemImage: "network")
+                }
+                if let location = headerLocation {
+                    headerPill(location, systemImage: "globe")
+                }
+                if let warp = state.directEndpoint?.warpLabel, warp != "WARP off" {
+                    headerPill(warp, systemImage: "shield")
+                }
             }
         }
+    }
+
+    private func headerPill(_ text: String, systemImage: String) -> some View {
+        Label(text, systemImage: systemImage)
+            .font(.system(size: 10, weight: .medium))
+            .foregroundColor(.secondary)
+            .lineLimit(1)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(Color.primary.opacity(0.05))
+            .cornerRadius(5)
     }
 
     private var healthColor: Color {
@@ -126,6 +184,16 @@ struct StatusHeader: View {
         case .poor:     return .red
         case .unknown:  return .gray
         }
+    }
+
+    private var headerLocation: String? {
+        guard let endpoint = state.directEndpoint else { return nil }
+        let label = endpoint.colo ?? endpoint.countryCode
+        guard let label, !label.isEmpty else { return nil }
+        if let flag = endpoint.flagEmoji {
+            return "\(flag) \(label)"
+        }
+        return label
     }
 }
 

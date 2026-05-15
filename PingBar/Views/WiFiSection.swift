@@ -5,7 +5,16 @@ struct WiFiSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            SectionLabel("WiFi")
+            HStack {
+                SectionHeader("Wi-Fi", systemImage: "wifi")
+                Spacer()
+                Button(action: { SystemSettings.openWiFi() }) {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 9))
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.secondary)
+            }
 
             if let wifi = state.wifiInfo {
                 wifiGrid(wifi)
@@ -20,6 +29,9 @@ struct WiFiSection: View {
     @ViewBuilder
     private func wifiGrid(_ wifi: WiFiInfo) -> some View {
         Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 3) {
+            if let ssid = wifi.ssid {
+                infoRow("SSID", ssid)
+            }
             if let ch = wifi.channel, let band = wifi.channelBand, let width = wifi.channelWidth {
                 infoRow("Channel", "\(ch) · \(band) · \(width)")
             }

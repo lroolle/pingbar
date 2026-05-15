@@ -90,14 +90,14 @@ enum WarningEngine {
                     warnings.append(Warning(
                         id: "rssi-critical",
                         severity: .critical,
-                        title: "Weak WiFi signal (\(rssi) dBm)",
+                        title: "Weak Wi-Fi signal (\(rssi) dBm)",
                         detail: "Signal strength is very low, expect disconnections"
                     ))
                 } else if rssi <= thresholds.rssiCaution {
                     warnings.append(Warning(
                         id: "rssi-caution",
                         severity: .caution,
-                        title: "WiFi signal \(rssi) dBm",
+                        title: "Wi-Fi signal \(rssi) dBm",
                         detail: "Signal is below optimal range"
                     ))
                 }
@@ -118,15 +118,6 @@ enum WarningEngine {
                     ))
                 }
             }
-        }
-
-        if proxyStatus.isActive && proxyStatus.ipsMatch {
-            warnings.append(Warning(
-                id: "proxy-ineffective",
-                severity: .caution,
-                title: "Proxy may not be routing traffic",
-                detail: "Direct IP and proxy IP are the same"
-            ))
         }
 
         warnings.sort { $0.severity > $1.severity }

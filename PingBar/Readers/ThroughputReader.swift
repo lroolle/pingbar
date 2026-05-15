@@ -3,9 +3,17 @@ import Foundation
 final class ThroughputReader {
     private var previousUpload: Int64 = 0
     private var previousDownload: Int64 = 0
+    private var previousReadTime: CFAbsoluteTime?
+    private var previousInterface: String?
     private var hasBaseline = false
 
     func read(interface: String) -> ThroughputSample {
+        let now = CFAbsoluteTimeGetCurrent()
+        if previousInterface != interface {
+            reset()
+            previousInterface = interface
+        }
+
         var sample = ThroughputSample()
         var addrs: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&addrs) == 0, let first = addrs else { return sample }
@@ -33,15 +41,26 @@ final class ThroughputReader {
             }
         }
 
-        if hasBaseline {
-            sample.upload = wrapSafeDelta(current: totalUpload, previous: previousUpload)
-            sample.download = wrapSafeDelta(current: totalDownload, previous: previousDownload)
+        if hasBaseline, let previousReadTime {
+            let elapsed = max(now - previousReadTime, 0.001)
+            let uploadDelta = wrapSafeDelta(current: totalUpload, previous: previousUpload)
+            let downloadDelta = wrapSafeDelta(current: totalDownload, previous: previousDownload)
+            sample.upload = Int64(Double(uploadDelta) / elapsed)
+            sample.download = Int64(Double(downloadDelta) / elapsed)
         }
 
         previousUpload = totalUpload
         previousDownload = totalDownload
+        previousReadTime = now
         hasBaseline = true
         return sample
+    }
+
+    func reset() {
+        previousUpload = 0
+        previousDownload = 0
+        previousReadTime = nil
+        hasBaseline = false
     }
 
     // UInt32 counters wrap at 4GB. On gigabit that's every ~34 seconds.

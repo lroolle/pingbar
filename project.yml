@@ -20,6 +20,7 @@ targets:
       - path: PingBar
         excludes:
           - "Resources/PingBar.entitlements"
+          - "Resources/Brand/PingBarAppIconSource.png"
     info:
       path: PingBar/Resources/Info.plist
       properties:
@@ -38,7 +39,40 @@ targets:
         CODE_SIGN_STYLE: Manual
         PRODUCT_BUNDLE_IDENTIFIER: com.lroolle.pingbar
         PRODUCT_NAME: PingBar
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ENABLE_HARDENED_RUNTIME: true
         INFOPLIST_FILE: PingBar/Resources/Info.plist
         LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks"
     dependencies: []
+
+  PingBarTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: PingBarTests
+      - path: PingBar/Models/AppConfig.swift
+      - path: PingBar/Models/EgressRouteResult.swift
+      - path: PingBar/Models/PingResult.swift
+      - path: PingBar/Models/ProxyStatus.swift
+      - path: PingBar/Models/PublicEndpointInfo.swift
+      - path: PingBar/Models/PublicIPProviderCatalog.swift
+      - path: PingBar/Models/Warning.swift
+      - path: PingBar/Models/WiFiInfo.swift
+      - path: PingBar/Services/Formatter.swift
+      - path: PingBar/Services/WarningEngine.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lroolle.pingbar.tests
+        SWIFT_VERSION: "5.9"
+        MACOSX_DEPLOYMENT_TARGET: "13.0"
+
+schemes:
+  PingBar:
+    build:
+      targets:
+        PingBar: all
+        PingBarTests: [test]
+    test:
+      gatherCoverageData: true
+      targets:
+        - PingBarTests

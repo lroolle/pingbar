@@ -6,7 +6,7 @@ struct ThroughputSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                SectionLabel("Throughput")
+                SectionHeader("Throughput", systemImage: "arrow.up.arrow.down")
                 Spacer()
                 if state.linkSpeed > 0 {
                     Text("Link \(Int(state.linkSpeed)) Mbps")
@@ -22,13 +22,21 @@ struct ThroughputSection: View {
             }
 
             if state.downloadHistory.count >= 4 {
-                DualSparkline(
+                ThroughputGraph(
                     uploadValues: state.uploadHistory.values,
                     downloadValues: state.downloadHistory.values,
-                    height: 32
+                    height: 62
                 )
-                .background(Color.primary.opacity(0.02))
-                .cornerRadius(4)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Color.primary.opacity(0.025))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.secondary.opacity(0.10), lineWidth: 0.5)
+                )
             }
         }
     }

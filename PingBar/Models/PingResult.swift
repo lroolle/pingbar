@@ -12,6 +12,7 @@ struct PingResult: Identifiable {
     var sent: Int = 0
     var received: Int = 0
     private var samples: [Double] = []
+    private var outcomes: [Bool] = []
     private let maxSamples = 60
 
     init(id: String, host: String, label: String) {
@@ -22,7 +23,16 @@ struct PingResult: Identifiable {
 
     mutating func record(latency: Double?) {
         sent += 1
-        guard let ms = latency else { return }
+        outcomes.append(latency != nil)
+        trimOutcomes()
+
+        guard let ms = latency else {
+            isReachable = false
+            latencyMs = nil
+            packetLoss = recentPacketLoss
+            return
+        }
+
         received += 1
         isReachable = true
         latencyMs = ms
@@ -42,13 +52,27 @@ struct PingResult: Identifiable {
             jitterMs = diffs / Double(samples.count - 1)
         }
 
-        packetLoss = sent > 0 ? Double(sent - received) / Double(sent) : 0
+        packetLoss = recentPacketLoss
     }
 
     mutating func recordTimeout() {
         sent += 1
+        outcomes.append(false)
+        trimOutcomes()
         isReachable = false
         latencyMs = nil
-        packetLoss = sent > 0 ? Double(sent - received) / Double(sent) : 0
+        packetLoss = recentPacketLoss
+    }
+
+    private mutating func trimOutcomes() {
+        if outcomes.count > maxSamples {
+            outcomes.removeFirst(outcomes.count - maxSamples)
+        }
+    }
+
+    private var recentPacketLoss: Double {
+        guard !outcomes.isEmpty else { return 0 }
+        let lost = outcomes.filter { !$0 }.count
+        return Double(lost) / Double(outcomes.count)
     }
 }

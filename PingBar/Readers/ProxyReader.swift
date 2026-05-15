@@ -1,4 +1,5 @@
 import Foundation
+import CFNetwork
 import AppKit
 import SystemConfiguration
 
@@ -20,9 +21,7 @@ final class ProxyReader {
         readSystemProxy(&status)
         detectProxyApp(&status)
 
-        status.isActive = status.httpProxy != nil
-                       || status.httpsProxy != nil
-                       || status.socksProxy != nil
+        status.isActive = status.hasConfiguredProxy
 
         return status
     }
@@ -64,6 +63,52 @@ final class ProxyReader {
            let enabled = settings[kCFNetworkProxiesSOCKSEnable as String] as? Int, enabled == 1 {
             status.socksProxy = status.socksProxy ?? "\(host):\(port)"
         }
+
+        status.httpProbeRoute = routeDescription(
+            for: URL(string: "http://api.ipify.org/")!,
+            settings: settings
+        )
+        status.httpsProbeRoute = routeDescription(
+            for: URL(string: "https://api64.ipify.org/")!,
+            settings: settings
+        )
+    }
+
+    private func routeDescription(for url: URL, settings: [String: Any]) -> String? {
+        guard let proxies = CFNetworkCopyProxiesForURL(url as CFURL, settings as CFDictionary)
+            .takeRetainedValue() as? [[String: Any]],
+              let proxy = proxies.first
+        else { return nil }
+
+        let type = proxy[kCFProxyTypeKey as String] as? String
+        if type == (kCFProxyTypeNone as String) {
+            return "DIRECT"
+        }
+
+        let label: String
+        if type == (kCFProxyTypeHTTP as String) {
+            label = "HTTP"
+        } else if type == (kCFProxyTypeHTTPS as String) {
+            label = "HTTPS"
+        } else if type == (kCFProxyTypeSOCKS as String) {
+            label = "SOCKS"
+        } else if type == (kCFProxyTypeAutoConfigurationURL as String) {
+            label = "PAC"
+        } else if type == (kCFProxyTypeAutoConfigurationJavaScript as String) {
+            label = "PAC JS"
+        } else {
+            label = type ?? "Proxy"
+        }
+
+        let host = proxy[kCFProxyHostNameKey as String] as? String
+        let port = proxy[kCFProxyPortNumberKey as String] as? Int
+        if let host, let port {
+            return "\(label) \(host):\(port)"
+        }
+        if let host {
+            return "\(label) \(host)"
+        }
+        return label
     }
 
     private func detectProxyApp(_ status: inout ProxyStatus) {

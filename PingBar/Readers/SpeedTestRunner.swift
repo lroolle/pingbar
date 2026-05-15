@@ -57,65 +57,119 @@ struct NativeSpeedResult {
 
 final class SpeedTestRunner {
     private static let baseURL = "https://speed.cloudflare.com"
+    private let lock = NSLock()
     private var cancelled = false
+    private var activeSession: URLSession?
 
-    private let session: URLSession = {
+    private static func makeSystemPathSession() -> URLSession {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 30
         config.timeoutIntervalForResource = 120
         return URLSession(configuration: config)
-    }()
+    }
 
-    private let directSession: URLSession = {
+    private static func makeNoURLProxySession() -> URLSession {
         let config = URLSessionConfiguration.ephemeral
-        config.connectionProxyDictionary = [:]
+        config.connectionProxyDictionary = [
+            kCFNetworkProxiesHTTPEnable as String: 0,
+            kCFNetworkProxiesHTTPSEnable as String: 0,
+            kCFNetworkProxiesSOCKSEnable as String: 0,
+            kCFNetworkProxiesProxyAutoConfigEnable as String: 0,
+            kCFNetworkProxiesProxyAutoDiscoveryEnable as String: 0,
+        ]
         config.timeoutIntervalForRequest = 30
         config.timeoutIntervalForResource = 120
         return URLSession(configuration: config)
-    }()
+    }
 
     func run(preset: SpeedTestPreset, noProxy: Bool) async throws -> NativeSpeedResult {
-        cancelled = false
+        setCancelled(false)
         var result = NativeSpeedResult()
-        let sess = noProxy ? directSession : session
+        var errors: [String] = []
+        let sess = noProxy ? Self.makeNoURLProxySession() : Self.makeSystemPathSession()
+        setActiveSession(sess)
+        defer { setActiveSession(nil) }
+        let measID = UUID().uuidString
 
-        let meta = try await fetchMeta(session: sess)
-        result.clientIP = meta.clientIP
-        result.server = meta.colo
-        result.location = "\(meta.city), \(meta.country)"
-
-        if cancelled { throw SpeedTestError.cancelled }
-
-        let (latency, jitter) = try await measureLatency(count: preset.latencyCount, session: sess)
-        result.latencyMs = latency
-        result.jitterMs = jitter
-
-        if cancelled { throw SpeedTestError.cancelled }
-
-        if !preset.downloadSizes.isEmpty {
-            result.downloadBps = try await measureDownload(steps: preset.downloadSizes, session: sess)
+        do {
+            let meta = try await fetchMeta(session: sess)
+            result.clientIP = meta.clientIP
+            result.server = meta.colo
+            result.location = [meta.city, meta.country].filter { !$0.isEmpty }.joined(separator: ", ")
+        } catch {
+            errors.append("metadata: \(error.localizedDescription)")
         }
 
-        if cancelled { throw SpeedTestError.cancelled }
+        if isCancelled { throw SpeedTestError.cancelled }
+
+        do {
+            let (latency, jitter) = try await measureLatency(count: preset.latencyCount, measID: measID, session: sess)
+            result.latencyMs = latency
+            result.jitterMs = jitter
+        } catch {
+            errors.append("latency: \(error.localizedDescription)")
+        }
+
+        if isCancelled { throw SpeedTestError.cancelled }
+
+        if !preset.downloadSizes.isEmpty {
+            do {
+                result.downloadBps = try await measureDownload(steps: preset.downloadSizes, measID: measID, session: sess)
+            } catch {
+                errors.append("download: \(error.localizedDescription)")
+            }
+        }
+
+        if isCancelled { throw SpeedTestError.cancelled }
 
         if !preset.uploadSizes.isEmpty {
-            result.uploadBps = try await measureUpload(steps: preset.uploadSizes, session: sess)
+            do {
+                result.uploadBps = try await measureUpload(steps: preset.uploadSizes, measID: measID, session: sess)
+            } catch {
+                errors.append("upload: \(error.localizedDescription)")
+            }
+        }
+
+        if result.latencyMs == 0 && result.downloadBps == 0 && result.uploadBps == 0 {
+            throw SpeedTestError.networkError(errors.joined(separator: "; "))
+        }
+
+        if !errors.isEmpty {
+            result.status = "partial"
+            result.error = errors.joined(separator: "; ")
         }
 
         return result
     }
 
     func cancel() {
-        cancelled = true
-        session.getAllTasks { tasks in tasks.forEach { $0.cancel() } }
-        directSession.getAllTasks { tasks in tasks.forEach { $0.cancel() } }
+        setCancelled(true)
+        currentSession()?.getAllTasks { tasks in tasks.forEach { $0.cancel() } }
+    }
+
+    private func setActiveSession(_ session: URLSession?) {
+        lock.lock()
+        activeSession = session
+        lock.unlock()
+    }
+
+    private func currentSession() -> URLSession? {
+        lock.lock()
+        defer { lock.unlock() }
+        return activeSession
     }
 
     private struct MetaResponse: Codable {
         let clientIp: String
-        let colo: String
-        let city: String
-        let country: String
+        let city: String?
+        let country: String?
+        let colo: ColoResponse?
+    }
+
+    private struct ColoResponse: Codable {
+        let iata: String?
+        let city: String?
+        let cca2: String?
     }
 
     private struct Meta {
@@ -127,27 +181,39 @@ final class SpeedTestRunner {
 
     private func fetchMeta(session: URLSession) async throws -> Meta {
         let url = URL(string: "\(Self.baseURL)/meta")!
-        let (data, _) = try await session.data(from: url)
+        var request = URLRequest(url: url)
+        applyCloudflareHeaders(to: &request)
+
+        let (data, response) = try await session.data(for: request)
+        try validateHTTP(response)
+
         let resp = try JSONDecoder().decode(MetaResponse.self, from: data)
-        return Meta(clientIP: resp.clientIp, colo: resp.colo, city: resp.city, country: resp.country)
+        return Meta(
+            clientIP: resp.clientIp,
+            colo: resp.colo?.iata ?? "",
+            city: resp.city ?? "",
+            country: resp.country ?? ""
+        )
     }
 
-    private func measureLatency(count: Int, session: URLSession) async throws -> (median: Double, jitter: Double) {
+    private func measureLatency(count: Int, measID: String, session: URLSession) async throws -> (median: Double, jitter: Double) {
         var samples: [Double] = []
 
         for _ in 0..<count {
-            if cancelled { break }
-            let url = URL(string: "\(Self.baseURL)/__down?bytes=0")!
+            if isCancelled { break }
+            let url = URL(string: "\(Self.baseURL)/__down?bytes=0&measId=\(measID)")!
             var request = URLRequest(url: url)
-            request.httpMethod = "HEAD"
+            request.httpMethod = "GET"
+            applyCloudflareHeaders(to: &request)
 
             let start = CFAbsoluteTimeGetCurrent()
-            let (_, _) = try await session.data(for: request)
+            let (_, response) = try await session.data(for: request)
+            try validateHTTP(response)
             let elapsed = (CFAbsoluteTimeGetCurrent() - start) * 1000
             samples.append(elapsed)
         }
 
-        guard !samples.isEmpty else { return (0, 0) }
+        guard !samples.isEmpty else { throw SpeedTestError.networkError("all latency probes failed") }
 
         let sorted = samples.sorted()
         let median = sorted[sorted.count / 2]
@@ -163,15 +229,19 @@ final class SpeedTestRunner {
         return (median, jitter)
     }
 
-    private func measureDownload(steps: [(bytes: Int, count: Int)], session: URLSession) async throws -> UInt64 {
+    private func measureDownload(steps: [(bytes: Int, count: Int)], measID: String, session: URLSession) async throws -> UInt64 {
         var allBps: [Double] = []
 
         for step in steps {
             for _ in 0..<step.count {
-                if cancelled { break }
-                let url = URL(string: "\(Self.baseURL)/__down?bytes=\(step.bytes)")!
+                if isCancelled { break }
+                let url = URL(string: "\(Self.baseURL)/__down?bytes=\(step.bytes)&measId=\(measID)")!
+                var request = URLRequest(url: url)
+                applyCloudflareHeaders(to: &request)
+
                 let start = CFAbsoluteTimeGetCurrent()
-                let (data, _) = try await session.data(from: url)
+                let (data, response) = try await session.data(for: request)
+                try validateHTTP(response)
                 let elapsed = CFAbsoluteTimeGetCurrent() - start
 
                 if elapsed > 0 {
@@ -181,7 +251,7 @@ final class SpeedTestRunner {
             }
         }
 
-        guard !allBps.isEmpty else { return 0 }
+        guard !allBps.isEmpty else { throw SpeedTestError.networkError("all download measurements failed") }
 
         let sorted = allBps.sorted()
         let trimCount = max(1, sorted.count / 4)
@@ -191,21 +261,23 @@ final class SpeedTestRunner {
         return UInt64(avg)
     }
 
-    private func measureUpload(steps: [(bytes: Int, count: Int)], session: URLSession) async throws -> UInt64 {
+    private func measureUpload(steps: [(bytes: Int, count: Int)], measID: String, session: URLSession) async throws -> UInt64 {
         var allBps: [Double] = []
 
         for step in steps {
             let payload = Data(count: step.bytes)
             for _ in 0..<step.count {
-                if cancelled { break }
-                let url = URL(string: "\(Self.baseURL)/__up")!
+                if isCancelled { break }
+                let url = URL(string: "\(Self.baseURL)/__up?measId=\(measID)")!
                 var request = URLRequest(url: url)
                 request.httpMethod = "POST"
                 request.httpBody = payload
                 request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+                applyCloudflareHeaders(to: &request)
 
                 let start = CFAbsoluteTimeGetCurrent()
-                let (_, _) = try await session.data(for: request)
+                let (_, response) = try await session.data(for: request)
+                try validateHTTP(response)
                 let elapsed = CFAbsoluteTimeGetCurrent() - start
 
                 if elapsed > 0 {
@@ -215,7 +287,7 @@ final class SpeedTestRunner {
             }
         }
 
-        guard !allBps.isEmpty else { return 0 }
+        guard !allBps.isEmpty else { throw SpeedTestError.networkError("all upload measurements failed") }
 
         let sorted = allBps.sorted()
         let trimCount = max(1, sorted.count / 4)
@@ -223,6 +295,31 @@ final class SpeedTestRunner {
         let avg = trimmed.reduce(0, +) / Double(trimmed.count)
 
         return UInt64(avg)
+    }
+
+    private var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+
+    private func setCancelled(_ value: Bool) {
+        lock.lock()
+        cancelled = value
+        lock.unlock()
+    }
+
+    private func applyCloudflareHeaders(to request: inout URLRequest) {
+        request.setValue(Self.baseURL + "/", forHTTPHeaderField: "Referer")
+        request.setValue("PingBar/0.1", forHTTPHeaderField: "User-Agent")
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+    }
+
+    private func validateHTTP(_ response: URLResponse) throws {
+        guard let http = response as? HTTPURLResponse else { return }
+        guard (200..<300).contains(http.statusCode) else {
+            throw SpeedTestError.networkError("HTTP \(http.statusCode)")
+        }
     }
 }
 

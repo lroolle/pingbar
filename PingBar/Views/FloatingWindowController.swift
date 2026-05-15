@@ -27,8 +27,9 @@ final class FloatingWindowController {
         panel.isMovableByWindowBackground = true
         panel.titlebarAppearsTransparent = true
         panel.titleVisibility = .hidden
-        panel.setContentSize(NSSize(width: 340, height: 560))
-        panel.minSize = NSSize(width: 300, height: 400)
+        panel.setFrameAutosaveName("PingBarFloatingWindow")
+        panel.setContentSize(NSSize(width: 380, height: 760))
+        panel.minSize = NSSize(width: 340, height: 560)
         panel.isReleasedWhenClosed = false
         panel.center()
         panel.makeKeyAndOrderFront(nil)

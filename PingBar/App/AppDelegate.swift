@@ -9,6 +9,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var popover: NSPopover!
     var state: NetworkState!
     private var cancellables = Set<AnyCancellable>()
+    private var settingsWindow: NSWindow?
+    private var settingsWindowController: NSWindowController?
+    private var stackedStatusView: StackedStatusItemView?
+    private var currentStatusItemLength: CGFloat?
 
     static func main() {
         let app = NSApplication.shared
@@ -20,6 +24,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        installMainMenu()
 
         state = NetworkState()
 
@@ -27,7 +32,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let contentView = PopupContentView().environmentObject(state)
         popover = NSPopover()
-        popover.contentSize = NSSize(width: 340, height: 560)
+        popover.contentSize = NSSize(width: 380, height: 760)
         popover.behavior = .transient
         popover.contentViewController = NSHostingController(rootView: contentView)
 
@@ -47,12 +52,46 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         updateLabel()
     }
 
+    private func installMainMenu() {
+        let mainMenu = NSMenu()
+
+        let appItem = NSMenuItem()
+        mainMenu.addItem(appItem)
+        let appMenu = NSMenu()
+        appItem.submenu = appMenu
+        appMenu.addItem(withTitle: "Quit PingBar", action: #selector(quit), keyEquivalent: "q")
+
+        let editItem = NSMenuItem()
+        mainMenu.addItem(editItem)
+        let editMenu = NSMenu(title: "Edit")
+        editItem.submenu = editMenu
+
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+
+        NSApp.mainMenu = mainMenu
+    }
+
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
 
     private func updateLabel() {
         guard let button = statusBarItem.button else { return }
 
         let config = state.config
+        applyStatusItemLength(length(for: config))
+
+        if config.menuBarStyle == .stacked {
+            updateStackedStatusView(config: config)
+            return
+        }
+
+        removeStackedStatusView()
+
         let dl = state.downloadBytesPerSec
         let ul = state.uploadBytesPerSec
         let health = state.health
@@ -64,13 +103,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let (dot, color) = healthIndicator(health)
             text.append(NSAttributedString(string: "\(dot) ", attributes: [
                 .foregroundColor: color,
-                .font: NSFont.systemFont(ofSize: 9),
+                .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+                .baselineOffset: 0.5,
             ]))
         }
 
         let (dlVal, dlUnit) = Fmt.bytesPerSec(dl)
 
         switch config.menuBarStyle {
+        case .stacked:
+            break
+
         case .compact:
             if config.showUploadInMenuBar {
                 let (ulVal, ulUnit) = Fmt.bytesPerSec(ul)
@@ -92,6 +135,53 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         button.attributedTitle = text
+    }
+
+    private func length(for config: AppConfig) -> CGFloat {
+        switch config.menuBarStyle {
+        case .stacked:
+            return CGFloat(config.stackedMenuBarWidth)
+        case .iconOnly:
+            return 22
+        case .compact, .detailed:
+            return config.menuBarFixedWidth ? CGFloat(config.menuBarWidth) : NSStatusItem.variableLength
+        }
+    }
+
+    private func applyStatusItemLength(_ length: CGFloat) {
+        if let currentStatusItemLength, abs(currentStatusItemLength - length) < 0.5 { return }
+        statusBarItem.length = length
+        currentStatusItemLength = length
+    }
+
+    private func updateStackedStatusView(config: AppConfig) {
+        guard let button = statusBarItem.button else { return }
+        button.title = ""
+        button.attributedTitle = NSAttributedString(string: "")
+
+        let view: StackedStatusItemView
+        if let stackedStatusView {
+            view = stackedStatusView
+        } else {
+            let newView = StackedStatusItemView(frame: button.bounds)
+            newView.autoresizingMask = [.width, .height]
+            button.addSubview(newView)
+            stackedStatusView = newView
+            view = newView
+        }
+
+        view.frame = button.bounds
+        view.update(
+            upload: state.uploadBytesPerSec,
+            download: state.downloadBytesPerSec,
+            health: state.health,
+            showsHealthDot: config.showHealthDot
+        )
+    }
+
+    private func removeStackedStatusView() {
+        stackedStatusView?.removeFromSuperview()
+        stackedStatusView = nil
     }
 
     private func healthIndicator(_ health: NetworkHealth) -> (String, NSColor) {
@@ -128,9 +218,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func showContextMenu() {
         let menu = NSMenu()
 
+        let pinItem = NSMenuItem(title: "Pin Window", action: #selector(pinWindow), keyEquivalent: "p")
+        pinItem.target = self
+        menu.addItem(pinItem)
+
         let settingsItem = NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
+
+        let networkItem = NSMenuItem(title: "Open Network Settings", action: #selector(openNetworkSettings), keyEquivalent: "")
+        networkItem.target = self
+        menu.addItem(networkItem)
 
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit PingBar", action: #selector(quit), keyEquivalent: "q")
@@ -141,18 +239,65 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func openSettings() {
+        showSettingsWindow()
+    }
+
+    func showSettingsWindow() {
+        DispatchQueue.main.async { [weak self] in
+            self?.presentSettingsWindow()
+        }
+    }
+
+    private func presentSettingsWindow() {
+        if let settingsWindow {
+            if settingsWindow.isMiniaturized {
+                settingsWindow.deminiaturize(nil)
+            }
+            settingsWindowController?.showWindow(nil)
+            settingsWindow.orderFrontRegardless()
+            settingsWindow.makeKeyAndOrderFront(nil)
+            activateSettingsWindow()
+            return
+        }
+
+        NSApp.setActivationPolicy(.accessory)
         let settingsView = SettingsView().environmentObject(state)
         let controller = NSHostingController(rootView: settingsView)
-        let window = NSWindow(contentViewController: controller)
+        let window = NSPanel(contentViewController: controller)
         window.title = "PingBar Settings"
-        window.styleMask = [.titled, .closable]
-        window.setContentSize(NSSize(width: 440, height: 320))
+        window.styleMask = [.titled, .closable, .resizable, .utilityWindow]
+        window.setContentSize(NSSize(width: 780, height: 540))
+        window.minSize = NSSize(width: 700, height: 480)
+        window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        window.hidesOnDeactivate = false
+        window.isFloatingPanel = true
+        window.level = .floating
         window.center()
+        window.isReleasedWhenClosed = false
+        let windowController = NSWindowController(window: window)
+        settingsWindowController = windowController
+        settingsWindow = window
+        windowController.showWindow(nil)
+        window.orderFrontRegardless()
         window.makeKeyAndOrderFront(nil)
+        activateSettingsWindow()
+    }
+
+    private func activateSettingsWindow() {
+        NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
         NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc func quit() {
         NSApp.terminate(self)
+    }
+
+    @objc func openNetworkSettings() {
+        SystemSettings.openNetwork()
+    }
+
+    @objc func pinWindow() {
+        popover.performClose(nil)
+        FloatingWindowController.shared.show(state: state)
     }
 }

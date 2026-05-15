@@ -1,0 +1,517 @@
+* [2026-05-13] Dev Log: PingBar speed-test and UX hardening       :RELIABILITY:UX:OPS:
+
+** Context
+PingBar is a native macOS menu bar network monitor in =/Users/eric/wrk/speedtest/worktree/pingbar=.
+
+** Why
+The in-app Cloudflare speed test failed before measurement because =https://speed.cloudflare.com/meta= returns =403= without a =Referer: https://speed.cloudflare.com/= header, and the Swift decoder expected =colo= to be a string while Cloudflare returns a nested object.
+
+** What
+- Fixed =SpeedTestRunner= metadata requests by matching the working Go CLI protocol: send Cloudflare =Referer=, use =GET /__down?bytes=0&measId=...= for latency, attach =measId= to download/upload probes, and validate HTTP status codes.
+- Changed speed-test execution from all-or-nothing to partial-result reporting so metadata, latency, download, or upload phase failures do not hide successful measurements.
+- Made =Direct= speed tests and direct public-IP checks disable HTTP, HTTPS, and SOCKS proxy settings through =URLSessionConfiguration.connectionProxyDictionary=.
+- Added stable menu bar width settings to reduce status-item flicker while live throughput text changes.
+- Added Wi-Fi/Network System Settings entry points and exposed active interface/gateway in the popover and copied diagnostic report.
+- Loaded speed-test history during =NetworkState= initialization so pinned/floating windows have history without requiring a popover =onAppear= pass.
+
+** How
+*** Steps
+1. Read prior dev logs in =docs/devlog/= and current app files under =PingBar/=.
+2. Reproduced Cloudflare metadata failure with =curl=.
+3. Compared Swift runner behavior to =worktree/speedtestcli/pkg/speedtest/cfbackend/meta.go= and =measure.go=.
+4. Patched Swift runner, settings, UI sections, and system-settings utility.
+5. Verified Cloudflare endpoint behavior with direct protocol probes.
+
+*** Commands
+#+BEGIN_SRC bash
+cd /Users/eric/wrk/speedtest/worktree/pingbar
+
+curl -sS -o /tmp/pingbar_meta_no_ref.json \
+  -w 'no_referer=%{http_code}\n' \
+  'https://speed.cloudflare.com/meta'
+
+curl -sS -o /tmp/pingbar_meta_with_ref.json \
+  -w 'with_referer=%{http_code}\n' \
+  -H 'Referer: https://speed.cloudflare.com/' \
+  'https://speed.cloudflare.com/meta'
+
+curl -sS -o /tmp/pingbar_down.bin \
+  -w 'down_http=%{http_code} bytes=%{size_download} time=%{time_total}\n' \
+  -H 'Referer: https://speed.cloudflare.com/' \
+  'https://speed.cloudflare.com/__down?bytes=100000&measId=codex-check'
+
+dd if=/dev/zero of=/tmp/pingbar_payload.bin bs=100000 count=1 >/dev/null 2>&1
+curl -sS -o /tmp/pingbar_up.out \
+  -w 'up_http=%{http_code} bytes=%{size_upload} time=%{time_total}\n' \
+  -H 'Referer: https://speed.cloudflare.com/' \
+  -H 'Content-Type: application/octet-stream' \
+  --data-binary @/tmp/pingbar_payload.bin \
+  'https://speed.cloudflare.com/__up?measId=codex-check'
+
+make build
+#+END_SRC
+
+*** Diffs
+#+BEGIN_SRC diff
+--- a/PingBar/Readers/SpeedTestRunner.swift
++++ b/PingBar/Readers/SpeedTestRunner.swift
+@@
+-        let (data, _) = try await session.data(from: url)
++        var request = URLRequest(url: url)
++        applyCloudflareHeaders(to: &request)
++        let (data, response) = try await session.data(for: request)
++        try validateHTTP(response)
+@@
+-        let clientIp: String
+-        let colo: String
++        let clientIp: String
++        let city: String?
++        let country: String?
++        let colo: ColoResponse?
+#+END_SRC
+
+** Result
+*** Outcome
+Protocol evidence shows the speed-test root cause and fixed request shape:
+- =/meta= without =Referer= returned =403=.
+- =/meta= with =Referer= returned =200= and JSON including =clientIp= and nested =colo=.
+- =/__down?bytes=100000&measId=codex-check= returned =200= with =100000= bytes.
+- =/__up?measId=codex-check= returned =200= after uploading =100000= bytes.
+
+*** Tests
+- Added: none; the repo has no test target.
+- Updated: none.
+- Not run: macOS app build; the current execution environment is Linux OrbStack and lacks =xcodegen= and =xcodebuild=.
+
+*** Metrics                                                             :PERF:
+| Metric | Before | After | Window | Source |
+|--------+--------+-------+--------+--------|
+| Cloudflare =/meta= without Referer | 403 | 403 | 2026-05-13T03:31Z | =curl= |
+| Cloudflare =/meta= with Referer | untested in app | 200 | 2026-05-13T03:31Z | =curl -H 'Referer: https://speed.cloudflare.com/'= |
+| Cloudflare 100 KB download probe | unverified in app | 200, 100000 bytes | 2026-05-13T03:31Z | =curl /__down?bytes=100000= |
+| Cloudflare 100 KB upload probe | unverified in app | 200, 100000 bytes uploaded | 2026-05-13T03:31Z | =curl /__up= |
+
+** Decisions
+| Decision | Alternatives | Rationale | DRI | Timestamp (UTC) |
+|----------+--------------+-----------+-----+-----------------|
+| Keep Cloudflare native runner and fix request semantics. | Shell out to =speedtestcli=; remove speed test. | Native runner preserves sandbox compatibility and the protocol failure had a clear root cause. | @pingbar-maintainer | 2026-05-13T03:31:00Z |
+| Return partial speed-test results. | Throw on first phase failure. | Network diagnostics need usable evidence when only one phase fails. | @pingbar-maintainer | 2026-05-13T03:31:00Z |
+| Default the menu bar to fixed width. | Keep variable length only. | Fixed width prevents flicker while live throughput strings change. | @pingbar-maintainer | 2026-05-13T03:31:00Z |
+
+** Risks
+| Risk | Mitigation | Owner | Status |
+|------+------------+-------+--------|
+| System Settings URL schemes vary across macOS releases. | Try modern Network extension URL first and legacy Network preference URL second. | @pingbar-maintainer | Mitigated |
+| No Swift compiler or Xcode build was available in the current environment. | Verify with =make build= on a macOS host that has =xcodegen= and Xcode command line tools. | @pingbar-maintainer | Open |
+| =Direct= URLSession proxy bypass may not cover every managed network profile. | Keep proxy status and direct/proxy public IP comparison visible. | @pingbar-maintainer | Open |
+
+** Rollback
+*** Trigger
+Rollback if =PingBar= fails to compile, speed tests still fail before latency/download probes, or direct/proxy public IP comparison becomes misleading on a managed macOS proxy profile.
+
+*** Procedure
+1. Revert changes in =PingBar/Readers/SpeedTestRunner.swift= and =PingBar/Readers/PublicIPReader.swift=.
+2. Revert UI/settings changes in =PingBar/App=, =PingBar/Models=, =PingBar/Views=, and =PingBar/Utilities/SystemSettings.swift=.
+3. Regenerate the Xcode project with =xcodegen generate= if needed.
+4. Data impact: none; only user defaults for menu bar width may remain.
+
+** WIP
+- [X] Fix Cloudflare metadata request semantics.
+- [X] Decode nested Cloudflare =colo= metadata.
+- [X] Preserve partial speed-test results.
+- [X] Add fixed-width menu bar setting.
+- [X] Add Wi-Fi/Network settings jump points.
+- [ ] Run =make build= on macOS with =xcodegen= and =xcodebuild= installed.
+- [ ] Add a real test target for =SpeedTestRunner= parsing and phase-result behavior.
+
+** Links
+- App worktree: =/Users/eric/wrk/speedtest/worktree/pingbar=
+- Prior dev log: =/Users/eric/wrk/speedtest/worktree/pingbar/docs/devlog/2026-05-12-pingbar-genesis.org=
+- Go protocol reference: =/Users/eric/wrk/speedtest/worktree/speedtestcli/pkg/speedtest/cfbackend/meta.go=
+- Swift runner: =/Users/eric/wrk/speedtest/worktree/pingbar/PingBar/Readers/SpeedTestRunner.swift=
+
+** Notes
+*** Constraints
+The active execution environment is =Linux orbstack 6.17.8-orbstack-00308-g8f9c941121b1 aarch64=, not a macOS/Xcode environment.
+
+*** Gotchas
+=PingBar.xcodeproj= is ignored by =.gitignore= as an XcodeGen artifact. The checked-in durable project definition is =project.yml=, whose folder source rule includes the new =PingBar/Utilities/SystemSettings.swift= file after regeneration.
+
+** Follow-up hardening                                                     :RELIABILITY:UX:
+*** Timestamp
+2026-05-13T05:52:15Z
+
+*** What changed
+- Corrected live throughput math to report bytes per second from counter delta divided by elapsed wall-clock time. The previous implementation only worked accidentally when the timer fired every exactly one second, and became wrong when users changed the throughput interval.
+- Reset throughput baselines when the active network interface changes so switching Wi-Fi/Ethernet cannot produce a bogus counter delta.
+- Added a timeout guard around HTTP latency probes so a stuck URLSession callback cannot block the single reader queue.
+- Made Settings host edits apply immediately by saving the host list, clearing removed-host latency state, and restarting readers.
+- Exposed Wi-Fi and network-detail refresh intervals in Settings; proxy/interface refresh now uses the configurable network-detail interval instead of a hardcoded 10 seconds.
+- Replaced macOS 14-only =.snappy= animations with macOS 13-compatible animations because the project deployment target is macOS 13.
+- Retained the Settings window, added a right-click =Pin Window= menu item, and gave the floating panel an autosave frame name so pinned placement survives normal AppKit window restoration.
+
+*** Verification
+#+BEGIN_SRC bash
+cd /Users/eric/wrk/speedtest/worktree/pingbar
+
+curl -sS -o /tmp/pingbar_meta_no_ref.json \
+  -w 'no_referer=%{http_code} bytes=%{size_download}\n' \
+  'https://speed.cloudflare.com/meta'
+# no_referer=403 bytes=2
+
+curl -sS -o /tmp/pingbar_meta_with_ref.json \
+  -w 'with_referer=%{http_code} bytes=%{size_download}\n' \
+  -H 'Referer: https://speed.cloudflare.com/' \
+  'https://speed.cloudflare.com/meta'
+# with_referer=200 bytes=391
+
+curl -sS -o /tmp/pingbar_down.bin \
+  -w 'down=%{http_code} bytes=%{size_download} time=%{time_total}\n' \
+  -H 'Referer: https://speed.cloudflare.com/' \
+  'https://speed.cloudflare.com/__down?bytes=100000&measId=codex-check'
+# down=200 bytes=100000 time=0.862723
+
+dd if=/dev/zero of=/tmp/pingbar_payload.bin bs=100000 count=1 >/dev/null 2>&1
+curl -sS -o /tmp/pingbar_up.out \
+  -w 'up=%{http_code} uploaded=%{size_upload} time=%{time_total}\n' \
+  -H 'Referer: https://speed.cloudflare.com/' \
+  -H 'Content-Type: application/octet-stream' \
+  --data-binary @/tmp/pingbar_payload.bin \
+  'https://speed.cloudflare.com/__up?measId=codex-check'
+# up=200 uploaded=100000 time=1.335229
+
+git diff --check
+# exit 0
+
+rg -n "\\.snappy|\\.smooth|@Observable|glassEffect|Process\\(" PingBar
+# exit 1, no matches
+
+make build
+# make: xcodegen: No such file or directory
+# make: *** [Makefile:6: project] Error 127
+#+END_SRC
+
+*** Remaining risk
+- Build and runtime verification still need a macOS host with =xcodegen= and =xcodebuild=.
+- The app still uses HTTP/TCP latency instead of ICMP. That is sandbox-compatible and useful for user-visible path health, but the UI should keep making that distinction clear as the diagnostics get more expert-facing.
+
+** Follow-up menu bar anti-flicker                                         :UX:
+*** Timestamp
+2026-05-13T06:14:25Z
+
+*** Context
+The fixed-width text menu bar item still flickered while throughput refreshed.
+
+*** Root cause hypothesis
+=AppDelegate.updateLabel()= assigned =statusBarItem.length= and replaced =button.attributedTitle= every refresh. Fixed width prevented horizontal size changes, but AppKit still re-laid out and redrew a text button as the throughput string changed.
+
+*** What changed
+- Added =MenuBarStyle.stacked= and made it the default style for users without an existing =menuBarStyle= default.
+- Added =StackedStatusItemView= as a fixed custom AppKit drawing view inside the status bar button.
+- Stacked rendering uses a stable left health dot and two fixed rows:
+  - upload on the top row
+  - download on the bottom row
+- Added =stackedMenuBarWidth= with a 96 pt default so stacked mode is compact without inheriting the wider compact/detailed text width.
+- Made =statusBarItem.length= updates idempotent so AppKit only receives a length assignment when the target length actually changes.
+- Kept compact, detailed, and icon-only styles available through Settings.
+
+*** Verification
+#+BEGIN_SRC bash
+cd /Users/eric/wrk/speedtest/worktree/pingbar
+
+git diff --check
+# exit 0
+
+rg -n "stackedMenuBarWidth|StackedStatusItemView|case stacked|statusBarItem.length|currentStatusItemLength|Menu bar width" PingBar
+# matched AppConfig, AppDelegate, SettingsView, and StackedStatusItemView
+
+make build
+# xcodegen generate
+# make: xcodegen: No such file or directory
+# make: *** [Makefile:6: project] Error 127
+#+END_SRC
+
+*** Remaining risk
+- Visual confirmation still requires running PingBar on macOS. The current environment cannot build or launch the app because =xcodegen= and =xcodebuild= are unavailable.
+
+** Follow-up evidence UI and Store readiness                              :UX:RELIABILITY:OPS:
+*** Timestamp
+2026-05-13T07:25:23Z
+
+*** Context
+PingBar needed to move from a dense monitor popup toward a releasable network evidence tool.
+
+*** What changed
+- Added section headers with SF Symbol icons for Throughput, Latency, Wi-Fi, Network Path, Speed Test, and Speed Test Log.
+- Reworked =StatusHeader= into a branded PingBar header with health, Wi-Fi SSID, active interface, and Cloudflare colo when available.
+- Added =PublicEndpointInfo= and upgraded =PublicIPReader= to fetch Cloudflare =/meta= for direct/proxy IP metadata: IP, city, country, ASN, organization, and colo.
+- Added =LatencySample= and =latencySampleHistory= to track both successful latency probes and timeouts.
+- Added =SmokePingGraph= for latency history with latency points and red loss ticks.
+- Expanded speed-test history entries with Wi-Fi SSID, RSSI, SNR, channel, band, interface, gateway, direct IP, and proxy IP context.
+- Reworked =SpeedTestHistorySection= so each row shows the network conditions behind the result.
+- Replaced the copy-report body with =PingBar Network Evidence Report=: summary, warnings, network path, throughput, latency evidence, Wi-Fi radio, last speed test, and recent speed-test log.
+- Enabled Mac App Store sandbox entitlements: =com.apple.security.app-sandbox= and =com.apple.security.network.client=.
+- Set =ASSETCATALOG_COMPILER_APPICON_NAME= to =AppIcon= in =project.yml=.
+- Added =docs/app-store-readiness.md= with positioning, release blockers, icon direction, and privacy/sandbox notes.
+
+*** Verification
+#+BEGIN_SRC bash
+cd /Users/eric/wrk/speedtest/worktree/pingbar
+
+git diff --check
+# exit 0
+
+rg -n "\\.tracking\\(|\\.snappy|\\.smooth|@Observable|glassEffect|Process\\(" PingBar
+# exit 1, no matches
+
+python3 - <<'PY'
+import json
+from pathlib import Path
+path = Path('PingBar/Resources/Assets.xcassets/AppIcon.appiconset/Contents.json')
+json.load(path.open())
+print(f'{path}: ok')
+PY
+# PingBar/Resources/Assets.xcassets/AppIcon.appiconset/Contents.json: ok
+
+make build
+# xcodegen generate
+# make: xcodegen: No such file or directory
+# make: *** [Makefile:6: project] Error 127
+#+END_SRC
+
+*** Decisions
+| Decision | Alternatives | Rationale | DRI | Timestamp (UTC) |
+|----------+--------------+-----------+-----+-----------------|
+| Use SF Symbol section icons before final raster branding. | Generate final app icon immediately. | The product surface and evidence hierarchy should stabilize before committing to final App Store artwork. | @pingbar-maintainer | 2026-05-13T07:25:23Z |
+| Use Cloudflare =/meta= for IP metadata. | Add another IP geolocation API. | PingBar already depends on Cloudflare speed-test endpoints; avoiding an additional vendor reduces privacy disclosure and failure surface. | @pingbar-maintainer | 2026-05-13T07:25:23Z |
+
+*** Remaining risk
+- Full build and runtime verification still require macOS with =xcodegen= and Xcode command line tools.
+- Final app icon PNGs are still missing from =AppIcon.appiconset=.
+- App Store privacy text and screenshots still need to be produced from a real signed build.
+
+** Follow-up path truth and graph polish                                  :UX:RELIABILITY:
+*** Timestamp
+2026-05-13T08:00:29Z
+
+*** Context
+The evidence UI needed clearer menu bar branding, a single latency graph, and truthful proxy/WARP labeling.
+
+*** What changed
+- Replaced per-host latency charts with =MultiLatencyGraph=, a single multi-line chart over all ping targets.
+- Converted latency rows into graph legend rows using stable host colors and current latency/jitter/loss values.
+- Extended Cloudflare path metadata with =https://www.cloudflare.com/cdn-cgi/trace= fields:
+  - =warp=
+  - =gateway=
+  - =http=
+  - =loc=
+- Displayed WARP/Gateway/HTTP trace details in =ProxySection= for direct and system-proxy probes.
+- Added WARP/Gateway state to speed-test history context.
+- Updated copied reports to explain probe semantics:
+  - Direct probe uses =URLSession= with HTTP/HTTPS/SOCKS proxy disabled.
+  - Proxy probe uses system proxy settings.
+  - WARP is a network tunnel, so disabling URLSession proxy settings does not bypass WARP.
+- Replaced the menu bar left dot with a small AppKit-drawn pulse glyph and status dot.
+- Increased stacked menu bar default width from 96 pt to 108 pt to fit the pulse glyph plus two throughput rows.
+- Widened popover/pinned window to 380 pt content size so ASN/WARP/IP details and the combined graph have room.
+- Tightened section typography and made section icons more intentional with small adaptive symbol chips.
+
+*** Verification
+#+BEGIN_SRC bash
+cd /Users/eric/wrk/speedtest/worktree/pingbar
+
+curl -sS https://www.cloudflare.com/cdn-cgi/trace | sed -n '1,80p'
+# includes warp=on in this environment
+
+git diff --check
+# exit 0
+
+rg -n "SmokePingGraph\\(|expandedHost|\\.tracking\\(|\\.snappy|\\.smooth|@Observable|glassEffect|Process\\(" PingBar
+# exit 1, no matches
+
+make build
+# xcodegen generate
+# make: xcodegen: No such file or directory
+# make: *** [Makefile:6: project] Error 127
+#+END_SRC
+
+*** Decisions
+| Decision | Alternatives | Rationale | DRI | Timestamp (UTC) |
+|----------+--------------+-----------+-----+-----------------|
+| Use =cdn-cgi/trace= for WARP detection. | Infer WARP from interface names or proxy apps. | Cloudflare trace directly reports =warp= and =gateway= from the same public path family PingBar already uses. | @pingbar-maintainer | 2026-05-13T08:00:29Z |
+| Use one combined latency graph. | Keep one sparkline per host. | Multi-line view makes gateway vs external degradation visible at a glance. | @pingbar-maintainer | 2026-05-13T08:00:29Z |
+
+*** Remaining risk
+- Full Swift compile and visual verification still require a macOS host with =xcodegen= and Xcode.
+- If a user runs WARP, the direct probe can still show WARP because WARP is a tunnel below URLSession proxy settings. The UI/report now states this explicitly.
+
+** Follow-up latency graph smokeplot pass                                  :UX:
+*** Timestamp
+2026-05-13T08:28:49Z
+
+*** Context
+The single combined latency graph was functionally better than separate per-host graphs, but the line-dominant visual treatment felt less professional than the earlier dot-based graph.
+
+*** What changed
+- Kept the combined multi-host latency graph.
+- Changed =MultiLatencyGraph= to make sample dots the primary marks and demote connecting lines to faint context.
+- Stopped drawing continuous lines through packet-loss gaps; loss samples now break the segment and render as red event ticks.
+- Right-aligned shorter host histories so their newest samples align with the current edge of the graph.
+- Added a current-sample halo to make the newest value readable without turning the whole graph into a heavy line chart.
+- Updated latency rows with dot-plus-line legend marks that match the graph.
+- Removed the now-unused standalone =SmokePingGraph= component.
+
+*** Verification
+#+BEGIN_SRC bash
+cd /Users/eric/wrk/speedtest/worktree/pingbar
+
+git diff --check
+# exit 0
+
+rg -n "SmokePingGraph|expandedHost|\\.snappy|\\.smooth|@Observable|glassEffect|Process\\(" PingBar
+# exit 1, no matches
+
+make build
+# xcodegen generate
+# make: xcodegen: No such file or directory
+# make: *** [Makefile:6: project] Error 127
+#+END_SRC
+
+*** Remaining risk
+- Visual verification still needs a real macOS run because this environment has no Swift compiler, =xcodegen=, or =xcodebuild=.
+
+** Follow-up build error fix                                                :BUILD:
+*** Timestamp
+2026-05-13T09:13:36Z
+
+*** Context
+User ran =make build= on macOS and Xcode failed in =PingSection.swift=:
+- =pingRow(_:) -> some View= had a local =let result= before the =HStack= expression.
+- Swift could not infer the opaque return type without an explicit =return=.
+- The same parse failure made the trailing =.cornerRadius(4)= look like an unused expression.
+
+*** What changed
+- Added an explicit =return= before the =HStack= in =pingRow(_:)=.
+- Changed the AppKit pulse path in =StackedStatusItemView= from =var= to =let= to clear the Swift warning.
+
+*** Verification
+#+BEGIN_SRC bash
+cd /Users/eric/wrk/speedtest/worktree/pingbar
+
+git diff --check
+# exit 0
+
+python3 - <<'PY'
+import json, struct
+from pathlib import Path
+appicon = Path('PingBar/Resources/Assets.xcassets/AppIcon.appiconset')
+json.load((appicon / 'Contents.json').open())
+for path in sorted(appicon.glob('*.png')):
+    with path.open('rb') as f:
+        sig = f.read(24)
+    assert sig[:8] == b'\x89PNG\r\n\x1a\n', path
+    w, h = struct.unpack('>II', sig[16:24])
+    print(f'{path.name}: {w}x{h}')
+PY
+# all ten macOS app icon PNGs validated with expected pixel sizes
+
+make build
+# xcodegen generate
+# make: xcodegen: No such file or directory
+# make: *** [Makefile:6: project] Error 127
+#+END_SRC
+
+*** Remaining risk
+- Full =make build= still needs the user's macOS/Xcode environment; this execution environment has no =xcodegen=, =xcodebuild=, or Swift compiler.
+
+** Follow-up throughput graph split-lane pass                              :UX:
+*** Timestamp
+2026-05-13T09:41:15Z
+
+*** Context
+The throughput graph lagged behind the latency graph polish: upload and download were overlaid in a short 32 pt sparkline, so the larger direction dominated and the fills blurred together.
+
+*** What changed
+- Added =ThroughputGraph= as a dedicated SwiftUI =Canvas= component.
+- Replaced the overlaid =DualSparkline= with a split-lane graph:
+  - upload renders above a center baseline in blue
+  - download renders below the baseline in green
+  - each lane gets its own scale so quiet upload is still readable
+- Increased graph height to 62 pt and matched the latency graph container treatment.
+- Added subtle grid lines, a center zero line, filled activity areas, crisp strokes, and current-sample endpoint caps.
+- Removed the unused =DualSparkline= component from =Sparkline.swift=.
+
+*** Verification
+#+BEGIN_SRC bash
+cd /Users/eric/wrk/speedtest/worktree/pingbar
+
+git diff --check
+# exit 0
+
+rg -n "DualSparkline|ThroughputGraph\\(|\\.snappy|\\.smooth|@Observable|glassEffect|Process\\(" PingBar
+# only ThroughputGraph usage remains
+
+make build
+# xcodegen generate
+# make: xcodegen: No such file or directory
+# make: *** [Makefile:6: project] Error 127
+#+END_SRC
+
+*** Remaining risk
+- Real Swift compile and visual verification still require the user's macOS/Xcode environment.
+- The repo still has no test target, so this visual component was verified by static checks only in this environment.
+
+** Follow-up dense latency and route semantics pass                         :UX:RELIABILITY:
+*** Timestamp
+2026-05-13T08:54:05Z
+
+*** Context
+The latency target list needed to stay readable when users add many targets, and the Direct/Proxy wording was misleading under VPN/WARP/TUN conditions.
+
+*** What changed
+- Added a compact latency target list:
+  - Gateway remains visible.
+  - Lossy, unreachable, or slow targets remain visible.
+  - Healthy overflow targets fold behind a =Show more targets= disclosure.
+- Added latency summary chips for target count, slowest current latency, loss count, and compact mode.
+- Highlighted problematic latency rows without changing the stable graph color legend.
+- Renamed route language in UI/report:
+  - =Direct= is now =No URL Proxy=.
+  - =Proxy= is now =System Proxy= only when macOS HTTP/HTTPS/SOCKS proxy settings exist.
+  - Otherwise the normal URLSession path is labeled =System Path=.
+- Disabled PAC and proxy auto-discovery for no-url-proxy sessions in both public-IP probes and speed tests.
+- Rebuilt public-IP and speed-test URLSessions per run so current macOS proxy settings are used after users toggle proxies/VPN apps.
+- Preserved public IPs when refreshing proxy settings so warning evaluation does not lose endpoint evidence.
+- Added a generated macOS app icon source and generated all =AppIcon.appiconset= PNG slots.
+- Added =scripts/generate_app_icon.py= to regenerate icon sizes from =PingBar/Resources/Brand/PingBarAppIconSource.png= without ImageMagick/Pillow.
+
+*** Route semantics
+No URL Proxy means URLSession was configured not to use HTTP, HTTPS, SOCKS, PAC, or proxy auto-discovery. It does not and cannot bypass a VPN, WARP, or TUN interface because those sit below URLSession routing.
+
+System Path means URLSession uses macOS system network settings. If a system URL proxy is configured, this should reveal the proxy egress. If only a VPN/tunnel is active, No URL Proxy and System Path can legitimately report the same VPN egress IP.
+
+*** Verification
+#+BEGIN_SRC bash
+cd /Users/eric/wrk/speedtest/worktree/pingbar
+
+python3 scripts/generate_app_icon.py
+# generated 10 AppIcon PNGs
+
+python3 -m py_compile scripts/generate_app_icon.py
+# exit 0
+
+git diff --check
+# exit 0
+
+rg -n "SmokePingGraph|expandedHost|\\.snappy|\\.smooth|@Observable|glassEffect|Process\\(" PingBar
+# exit 1, no matches
+
+make build
+# xcodegen generate
+# make: xcodegen: No such file or directory
+# make: *** [Makefile:6: project] Error 127
+#+END_SRC
+
+*** Remaining risk
+- Full Swift compile and runtime verification still require a macOS host with =xcodegen= and Xcode.
+- The current environment cannot prove CFNetwork behavior under real macOS proxy/VPN combinations. The code now reports the semantics explicitly instead of pretending URL proxy bypass can bypass network tunnels.

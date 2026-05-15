@@ -7,7 +7,7 @@ struct SpeedTestSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            SectionLabel("Speed Test")
+            SectionHeader("Speed Test", systemImage: "speedometer")
 
             if state.isSpeedTestRunning {
                 runningView
@@ -36,7 +36,7 @@ struct SpeedTestSection: View {
             .frame(width: 120)
             .controlSize(.small)
 
-            Toggle("Direct", isOn: $noProxy)
+            Toggle("No Proxy", isOn: $noProxy)
                 .toggleStyle(.checkbox)
                 .font(.system(size: 10))
                 .controlSize(.small)
@@ -53,8 +53,9 @@ struct SpeedTestSection: View {
 
     private var runningView: some View {
         HStack(spacing: 8) {
-            ProgressView()
-                .controlSize(.small)
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.secondary)
             Text("Testing...")
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
@@ -68,6 +69,16 @@ struct SpeedTestSection: View {
     private func resultView(_ result: NativeSpeedResult) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
+                if result.status == "partial" {
+                    Text("Partial")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundColor(.orange)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Color.orange.opacity(0.10))
+                        .cornerRadius(3)
+                }
+
                 if !result.server.isEmpty {
                     Text(result.server)
                         .font(.system(size: 9, weight: .medium))
@@ -114,6 +125,13 @@ struct SpeedTestSection: View {
                             .foregroundColor(.blue)
                     }
                 }
+            }
+
+            if let error = result.error {
+                Text(error)
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+                    .lineLimit(2)
             }
         }
         .padding(8)

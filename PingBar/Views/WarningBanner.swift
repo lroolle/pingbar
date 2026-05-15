@@ -2,28 +2,45 @@ import SwiftUI
 
 struct WarningBanner: View {
     let warnings: [Warning]
+    let clearAction: () -> Void
+    @State private var expanded = false
+
+    private var visibleWarnings: [Warning] {
+        expanded ? warnings : Array(warnings.prefix(3))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            ForEach(warnings) { warning in
-                HStack(spacing: 6) {
-                    Image(systemName: iconName(warning.severity))
-                        .foregroundColor(iconColor(warning.severity))
-                        .font(.system(size: 10))
-                        .frame(width: 14)
+            HStack(spacing: 6) {
+                Image(systemName: iconName(worstSeverity))
+                    .foregroundColor(iconColor(worstSeverity))
+                    .font(.system(size: 10))
+                    .frame(width: 14)
 
-                    VStack(alignment: .leading, spacing: 0) {
-                        Text(warning.title)
-                            .font(.system(size: 11, weight: .medium))
-                        if let detail = warning.detail {
-                            Text(detail)
-                                .font(.system(size: 9))
-                                .foregroundColor(.secondary)
-                        }
+                Text(summaryText)
+                    .font(.system(size: 11, weight: .semibold))
+
+                Spacer()
+
+                if warnings.count > 3 {
+                    Button(expanded ? "Less" : "+\(warnings.count - 3)") {
+                        withAnimation(.easeInOut(duration: 0.16)) { expanded.toggle() }
                     }
-
-                    Spacer()
+                    .buttonStyle(.plain)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.secondary)
                 }
+
+                Button(action: clearAction) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.secondary)
+            }
+
+            ForEach(visibleWarnings) { warning in
+                warningRow(warning)
             }
         }
         .padding(8)
@@ -31,13 +48,55 @@ struct WarningBanner: View {
         .cornerRadius(6)
     }
 
+    private func warningRow(_ warning: Warning) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Circle()
+                .fill(iconColor(warning.severity).opacity(0.8))
+                .frame(width: 5, height: 5)
+                .padding(.top, 2)
+                .frame(width: 14)
+
+            VStack(alignment: .leading, spacing: 0) {
+                Text(warning.title)
+                    .font(.system(size: 10, weight: .medium))
+                    .lineLimit(1)
+                if expanded, let detail = warning.detail {
+                    Text(detail)
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
+                }
+            }
+
+            Spacer()
+        }
+    }
+
+    private var summaryText: String {
+        let criticals = warnings.filter { $0.severity == .critical }.count
+        let cautions = warnings.filter { $0.severity == .caution }.count
+        if criticals > 0, cautions > 0 {
+            return "\(criticals) critical, \(cautions) caution"
+        }
+        if criticals > 0 {
+            return criticals == 1 ? "1 critical warning" : "\(criticals) critical warnings"
+        }
+        if cautions > 0 {
+            return cautions == 1 ? "1 caution" : "\(cautions) cautions"
+        }
+        return warnings.count == 1 ? "1 notice" : "\(warnings.count) notices"
+    }
+
     private var bannerBackground: Color {
-        let worst = warnings.map(\.severity).max() ?? .info
-        switch worst {
+        switch worstSeverity {
         case .critical: return Color.red.opacity(0.08)
         case .caution:  return Color.orange.opacity(0.08)
         case .info:     return Color.blue.opacity(0.08)
         }
+    }
+
+    private var worstSeverity: WarningSeverity {
+        warnings.map(\.severity).max() ?? .info
     }
 
     private func iconName(_ severity: WarningSeverity) -> String {
