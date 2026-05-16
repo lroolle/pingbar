@@ -9,17 +9,31 @@ on:
 jobs:
   test:
     name: Build and test
-    runs-on: macos-latest
+    runs-on: macos-26
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Select Xcode
+        run: |
+          xcode_265_target="$(readlink /Applications/Xcode_26.5.app 2>/dev/null || true)"
+          if [ -d /Applications/Xcode_26.5.app ] && ! echo "$xcode_265_target" | grep -qi beta; then
+            sudo xcode-select -s /Applications/Xcode_26.5.app/Contents/Developer
+          elif [ -d /Applications/Xcode_26.4.1.app ]; then
+            sudo xcode-select -s /Applications/Xcode_26.4.1.app/Contents/Developer
+          else
+            sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          fi
+
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Generate project
-        run: xcodegen generate
+      - name: Check toolchain
+        run: make doctor
 
       - name: Test
         run: make test
+
+      - name: Build
+        run: make build

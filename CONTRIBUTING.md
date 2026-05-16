@@ -6,7 +6,7 @@ PingBar is a native macOS network evidence tool. Contributions should keep the a
 
 ```bash
 brew install xcodegen
-make project
+make doctor
 make build
 make test
 ```

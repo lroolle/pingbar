@@ -1,21 +1,32 @@
 BUILD_DIR = $(CURDIR)/build
+DERIVED_DATA_DIR = $(BUILD_DIR)/DerivedData
+XCODEBUILD ?= xcodebuild
+XCODEGEN ?= xcodegen
 
-.PHONY: project build test run clean
+.PHONY: doctor project build test run ci clean
+
+doctor:
+	./scripts/doctor.sh
 
 project:
-	xcodegen generate
+	$(XCODEGEN) generate
 
-build: project
-	xcodebuild -project PingBar.xcodeproj -scheme PingBar -configuration Debug \
+build: doctor project
+	$(XCODEBUILD) -project PingBar.xcodeproj -scheme PingBar -configuration Debug \
+		-derivedDataPath $(DERIVED_DATA_DIR) \
 		CONFIGURATION_BUILD_DIR=$(BUILD_DIR) build
 
-test: project
-	xcodebuild test -project PingBar.xcodeproj -scheme PingBar -configuration Debug \
-		-destination 'platform=macOS'
+test: doctor project
+	$(XCODEBUILD) test -project PingBar.xcodeproj -scheme PingBar -configuration Debug \
+		-destination 'platform=macOS' \
+		-derivedDataPath $(DERIVED_DATA_DIR) \
+		-enableCodeCoverage YES
 
 run: build
-	open $(BUILD_DIR)/PingBar.app
+	open -n $(BUILD_DIR)/PingBar.app
+
+ci: doctor test build
 
 clean:
-	xcodebuild -project PingBar.xcodeproj -scheme PingBar clean
+	-$(XCODEBUILD) -project PingBar.xcodeproj -scheme PingBar clean
 	rm -rf $(BUILD_DIR)

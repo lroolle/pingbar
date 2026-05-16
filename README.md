@@ -11,9 +11,10 @@
 <p align="center">
   <a href="https://github.com/lroolle/PingBar/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/lroolle/PingBar/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="macOS 13+" src="https://img.shields.io/badge/macOS-13%2B-111111?logo=apple&logoColor=white">
-  <img alt="Swift 5.9" src="https://img.shields.io/badge/Swift-5.9-F05138?logo=swift&logoColor=white">
+  <img alt="Swift 6 compiler" src="https://img.shields.io/badge/Swift-6%20compiler-F05138?logo=swift&logoColor=white">
+  <img alt="Xcode 26" src="https://img.shields.io/badge/Xcode-26-147EFB?logo=xcode&logoColor=white">
   <img alt="XcodeGen" src="https://img.shields.io/badge/project-XcodeGen-147EFB">
-  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-0E7A5F"></a>
+  <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-0E7A5F"></a>
 </p>
 
 <p align="center">
@@ -44,13 +45,14 @@ Most network meters stop at "up" and "down." PingBar is built for the next quest
 Requirements:
 
 - macOS 13 or newer
-- Xcode 16 or newer
+- Xcode 26 or newer. Xcode 26.5 is the current recommended baseline.
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen)
 
 ```bash
 git clone https://github.com/lroolle/PingBar.git
 cd PingBar
 brew install xcodegen
+make doctor
 make run
 ```
 
@@ -113,14 +115,16 @@ Current developer builds also use local macOS tools for some evidence paths (`/s
 ## Development
 
 ```bash
+make doctor    # Print the selected Xcode, Swift compiler, and macOS SDK
 make project   # Generate PingBar.xcodeproj from project.yml
 make build     # Build Debug app into ./build
 make test      # Run XCTest coverage for the pure core logic
 make run       # Build and launch PingBar
+make ci        # Local equivalent of the GitHub Actions build/test path
 make clean
 ```
 
-CI runs the same generated Xcode project on macOS with XcodeGen.
+CI runs the same generated Xcode project on macOS 26 with XcodeGen. The project uses the active Xcode macOS SDK (`SDKROOT = macosx`), the Swift 6 compiler, and Swift 5 language mode with complete strict-concurrency checking enabled as the migration bridge before flipping to Swift 6 language mode.
 
 ## Project Structure
 
@@ -161,4 +165,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contributor notes.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Apache License 2.0. See [LICENSE](LICENSE).
