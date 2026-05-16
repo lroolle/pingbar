@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/lroolle/pingbar/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/lroolle/pingbar/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/lroolle/PingBar/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/lroolle/PingBar/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="macOS 13+" src="https://img.shields.io/badge/macOS-13%2B-111111?logo=apple&logoColor=white">
   <img alt="Swift 5.9" src="https://img.shields.io/badge/Swift-5.9-F05138?logo=swift&logoColor=white">
   <img alt="XcodeGen" src="https://img.shields.io/badge/project-XcodeGen-147EFB">
@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/pingbar-readme-banner.svg" width="860" alt="PingBar preview showing menu bar throughput, latency, Wi-Fi, proxy route evidence, and native speed tests">
+  <img src="docs/assets/pingbar-readme-art.png" width="860" alt="Abstract PingBar artwork showing luminous signal paths and latency pulses">
 </p>
 
 PingBar is a native macOS menu bar utility for engineers, remote workers, and anyone who needs proof when the network feels wrong. It keeps a compact live signal in the menu bar, then opens into a focused evidence panel with throughput, latency, Wi-Fi radio quality, proxy/egress routes, process traffic, and native Cloudflare speed tests.
@@ -48,8 +48,8 @@ Requirements:
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen)
 
 ```bash
-git clone https://github.com/lroolle/pingbar.git
-cd pingbar
+git clone https://github.com/lroolle/PingBar.git
+cd PingBar
 brew install xcodegen
 make run
 ```

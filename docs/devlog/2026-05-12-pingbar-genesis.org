@@ -225,7 +225,7 @@ but the signing/submission pipeline isn't.
 
 ** Artifacts
 
-Repository: https://github.com/lroolle/pingbar
+Repository: https://github.com/lroolle/PingBar
 3 commits, 29 Swift files, 2496 lines of code.
 
 File structure:
