@@ -1,4 +1,5 @@
 import Foundation
+import CFNetwork
 
 enum SpeedTestPreset: String, CaseIterable, Identifiable {
     case quick
@@ -55,7 +56,7 @@ struct NativeSpeedResult {
     var error: String?
 }
 
-final class SpeedTestRunner {
+final class SpeedTestRunner: @unchecked Sendable {
     private static let baseURL = "https://speed.cloudflare.com"
     private let lock = NSLock()
     private var cancelled = false
@@ -180,7 +181,7 @@ final class SpeedTestRunner {
     }
 
     private func fetchMeta(session: URLSession) async throws -> Meta {
-        let url = URL(string: "\(Self.baseURL)/meta")!
+        let url = try makeURL(path: "/meta")
         var request = URLRequest(url: url)
         applyCloudflareHeaders(to: &request)
 
@@ -201,7 +202,10 @@ final class SpeedTestRunner {
 
         for _ in 0..<count {
             if isCancelled { break }
-            let url = URL(string: "\(Self.baseURL)/__down?bytes=0&measId=\(measID)")!
+            let url = try makeURL(path: "/__down", queryItems: [
+                URLQueryItem(name: "bytes", value: "0"),
+                URLQueryItem(name: "measId", value: measID),
+            ])
             var request = URLRequest(url: url)
             request.httpMethod = "GET"
             applyCloudflareHeaders(to: &request)
@@ -235,7 +239,10 @@ final class SpeedTestRunner {
         for step in steps {
             for _ in 0..<step.count {
                 if isCancelled { break }
-                let url = URL(string: "\(Self.baseURL)/__down?bytes=\(step.bytes)&measId=\(measID)")!
+                let url = try makeURL(path: "/__down", queryItems: [
+                    URLQueryItem(name: "bytes", value: String(step.bytes)),
+                    URLQueryItem(name: "measId", value: measID),
+                ])
                 var request = URLRequest(url: url)
                 applyCloudflareHeaders(to: &request)
 
@@ -268,7 +275,9 @@ final class SpeedTestRunner {
             let payload = Data(count: step.bytes)
             for _ in 0..<step.count {
                 if isCancelled { break }
-                let url = URL(string: "\(Self.baseURL)/__up?measId=\(measID)")!
+                let url = try makeURL(path: "/__up", queryItems: [
+                    URLQueryItem(name: "measId", value: measID),
+                ])
                 var request = URLRequest(url: url)
                 request.httpMethod = "POST"
                 request.httpBody = payload
@@ -295,6 +304,18 @@ final class SpeedTestRunner {
         let avg = trimmed.reduce(0, +) / Double(trimmed.count)
 
         return UInt64(avg)
+    }
+
+    private func makeURL(path: String, queryItems: [URLQueryItem] = []) throws -> URL {
+        guard var components = URLComponents(string: Self.baseURL) else {
+            throw SpeedTestError.networkError("invalid speed-test base URL")
+        }
+        components.path = path
+        components.queryItems = queryItems.isEmpty ? nil : queryItems
+        guard let url = components.url else {
+            throw SpeedTestError.networkError("invalid speed-test URL")
+        }
+        return url
     }
 
     private var isCancelled: Bool {

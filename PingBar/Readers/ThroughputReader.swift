@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 final class ThroughputReader {
     private var previousUpload: Int64 = 0
@@ -43,10 +44,23 @@ final class ThroughputReader {
 
         if hasBaseline, let previousReadTime {
             let elapsed = max(now - previousReadTime, 0.001)
-            let uploadDelta = wrapSafeDelta(current: totalUpload, previous: previousUpload)
-            let downloadDelta = wrapSafeDelta(current: totalDownload, previous: previousDownload)
-            sample.upload = Int64(Double(uploadDelta) / elapsed)
-            sample.download = Int64(Double(downloadDelta) / elapsed)
+            if let uploadDelta = Self.counterDelta(
+                current: totalUpload,
+                previous: previousUpload,
+                elapsed: elapsed,
+                linkSpeedMbps: sample.linkSpeed
+            ),
+               let downloadDelta = Self.counterDelta(
+                   current: totalDownload,
+                   previous: previousDownload,
+                   elapsed: elapsed,
+                   linkSpeedMbps: sample.linkSpeed
+               ) {
+                sample.uploadDelta = uploadDelta
+                sample.downloadDelta = downloadDelta
+                sample.upload = Int64(Double(uploadDelta) / elapsed)
+                sample.download = Int64(Double(downloadDelta) / elapsed)
+            }
         }
 
         previousUpload = totalUpload
@@ -63,11 +77,30 @@ final class ThroughputReader {
         hasBaseline = false
     }
 
-    // UInt32 counters wrap at 4GB. On gigabit that's every ~34 seconds.
-    private func wrapSafeDelta(current: Int64, previous: Int64) -> Int64 {
+    static func counterDelta(current: Int64, previous: Int64, elapsed: CFTimeInterval, linkSpeedMbps: Double) -> Int64? {
         if current >= previous {
-            return current - previous
+            let delta = current - previous
+            return isPlausible(delta: delta, elapsed: elapsed, linkSpeedMbps: linkSpeedMbps) ? delta : nil
         }
-        return Int64(UInt32.max) - previous + current + 1
+
+        // Some macOS interface counters are effectively UInt32 and can wrap.
+        // A counter reset looks similar, so only accept a wrap if the delta is plausible.
+        let wrapLimit = Int64(UInt32.max) + 1
+        let wrappedDelta = wrapLimit - previous + current
+        if linkSpeedMbps > 0 && isPlausible(delta: wrappedDelta, elapsed: elapsed, linkSpeedMbps: linkSpeedMbps) {
+            return wrappedDelta
+        }
+
+        let halfCounter = wrapLimit / 2
+        return linkSpeedMbps <= 0 && previous > halfCounter && current < halfCounter ? wrappedDelta : nil
+    }
+
+    private static func isPlausible(delta: Int64, elapsed: CFTimeInterval, linkSpeedMbps: Double) -> Bool {
+        guard delta >= 0 else { return false }
+        guard linkSpeedMbps > 0 else { return true }
+
+        let bytesPerSecond = linkSpeedMbps * 1_000_000 / 8
+        let maxPlausibleDelta = Int64(bytesPerSecond * elapsed * 3)
+        return delta <= max(maxPlausibleDelta, 16 * 1_048_576)
     }
 }

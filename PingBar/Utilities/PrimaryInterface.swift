@@ -12,8 +12,11 @@ enum PrimaryInterface {
     static func displayLabel(for name: String?) -> String? {
         guard let name else { return nil }
 
-        for item in SCNetworkInterfaceCopyAll() as NSArray {
-            let interface = item as! SCNetworkInterface
+        guard let interfaces = SCNetworkInterfaceCopyAll() as? [SCNetworkInterface] else {
+            return name
+        }
+
+        for interface in interfaces {
             guard let bsdName = SCNetworkInterfaceGetBSDName(interface) as String?,
                   bsdName == name
             else { continue }

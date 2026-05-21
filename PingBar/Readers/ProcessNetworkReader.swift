@@ -16,7 +16,9 @@ final class ProcessNetworkReader {
         let now = Date()
         let rows = nettopRows()
         defer {
-            previousRows = Dictionary(uniqueKeysWithValues: rows.map { ($0.pid, $0) })
+            previousRows = rows.reduce(into: [Int: NetTopRow]()) { rowsByPID, row in
+                rowsByPID[row.pid] = row
+            }
             previousReadDate = now
         }
 

@@ -21,6 +21,14 @@ struct ThroughputSection: View {
                 Spacer()
             }
 
+            if let rollup = state.recentThroughputAggregate {
+                HStack(spacing: 6) {
+                    throughputMetric("\(rollup.windowSeconds)s avg", upload: rollup.averageUpload, download: rollup.averageDownload)
+                    throughputMetric("Peak", upload: rollup.peakUpload, download: rollup.peakDownload)
+                    Spacer(minLength: 0)
+                }
+            }
+
             if state.downloadHistory.count >= 4 {
                 ThroughputGraph(
                     uploadValues: state.uploadHistory.values,
@@ -55,4 +63,35 @@ struct ThroughputSection: View {
                 .offset(y: 2)
         }
     }
+
+    private func throughputMetric(_ title: String, upload: Int64, download: Int64) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title.uppercased())
+                .font(.system(size: 8, weight: .semibold))
+                .foregroundColor(.secondary)
+            HStack(spacing: 5) {
+                compactThroughput("↑", upload, color: .blue)
+                compactThroughput("↓", download, color: .green)
+            }
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 5)
+        .background(Color.primary.opacity(0.035))
+        .cornerRadius(6)
+    }
+
+    private func compactThroughput(_ prefix: String, _ bytes: Int64, color: Color) -> some View {
+        let formatted = Fmt.bytesPerSec(bytes)
+        return HStack(spacing: 2) {
+            Text(prefix)
+                .foregroundColor(color)
+            Text(formatted.value)
+                .fontWeight(.semibold)
+            Text(formatted.unit)
+                .foregroundColor(.secondary)
+        }
+        .font(.system(size: 9, design: .monospaced))
+        .lineLimit(1)
+    }
+
 }

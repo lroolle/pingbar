@@ -1,10 +1,24 @@
 import AppKit
 
+struct StatusItemLine {
+    let symbol: String
+    let text: String
+    let color: NSColor
+}
+
+enum StatusItemLayout: Equatable {
+    case rows
+    case columns
+}
+
 final class StackedStatusItemView: NSView {
-    private var uploadText = ""
-    private var downloadText = ""
+    private var lines: [StatusItemLine] = []
+    private var leadingLines: [StatusItemLine] = []
+    private var trailingLines: [StatusItemLine] = []
+    private var lineSignature: [String] = []
     private var health: NetworkHealth = .unknown
     private var showsHealthDot = true
+    private var layout: StatusItemLayout = .rows
 
     override var isFlipped: Bool { true }
 
@@ -13,19 +27,65 @@ final class StackedStatusItemView: NSView {
     }
 
     func update(upload: Int64, download: Int64, health: NetworkHealth, showsHealthDot: Bool) {
-        let nextUploadText = Self.statusLine(prefix: "↑", bytes: upload)
-        let nextDownloadText = Self.statusLine(prefix: "↓", bytes: download)
+        update(
+            lines: [
+                StatusItemLine(symbol: "↑", text: Self.statusLine(bytes: upload), color: .systemBlue),
+                StatusItemLine(symbol: "↓", text: Self.statusLine(bytes: download), color: .systemGreen),
+            ],
+            health: health,
+            showsHealthDot: showsHealthDot,
+            layout: .rows
+        )
+    }
 
-        guard nextUploadText != uploadText
-                || nextDownloadText != downloadText
+    func update(
+        lines: [StatusItemLine],
+        health: NetworkHealth,
+        showsHealthDot: Bool,
+        layout: StatusItemLayout = .rows
+    ) {
+        let nextLines = Array(lines.prefix(2))
+        let nextSignature = nextLines.map { "\($0.symbol)|\($0.text)" }
+
+        guard nextSignature != lineSignature
                 || health != self.health
                 || showsHealthDot != self.showsHealthDot
+                || layout != self.layout
         else { return }
 
-        uploadText = nextUploadText
-        downloadText = nextDownloadText
+        self.lines = nextLines
+        leadingLines = []
+        trailingLines = []
+        lineSignature = nextSignature
         self.health = health
         self.showsHealthDot = showsHealthDot
+        self.layout = layout
+        needsDisplay = true
+    }
+
+    func update(
+        leading: [StatusItemLine],
+        trailing: [StatusItemLine],
+        health: NetworkHealth,
+        showsHealthDot: Bool
+    ) {
+        let nextLeading = Array(leading.prefix(2))
+        let nextTrailing = Array(trailing.prefix(2))
+        let nextSignature = (nextLeading + nextTrailing).map { "\($0.symbol)|\($0.text)" }
+
+        guard nextSignature != lineSignature
+                || health != self.health
+                || showsHealthDot != self.showsHealthDot
+                || layout != .columns
+        else { return }
+
+        lines = []
+        leadingLines = nextLeading
+        trailingLines = nextTrailing
+        lineSignature = nextSignature
+        self.health = health
+        self.showsHealthDot = showsHealthDot
+        layout = .columns
         needsDisplay = true
     }
 
@@ -42,8 +102,63 @@ final class StackedStatusItemView: NSView {
             drawPulseIcon(midY: midY)
         }
 
-        drawLine(uploadText, at: NSPoint(x: textX, y: topY), color: .systemBlue)
-        drawLine(downloadText, at: NSPoint(x: textX, y: bottomY), color: .systemGreen)
+        if layout == .columns, !leadingLines.isEmpty || !trailingLines.isEmpty {
+            drawSplitRows(textX: textX, topY: topY, bottomY: bottomY)
+            return
+        }
+
+        if layout == .columns, lines.count == 2 {
+            drawColumns(textX: textX, midY: midY, rowHeight: rowHeight)
+            return
+        }
+
+        let yPositions = lines.count <= 1 ? [floor(midY - rowHeight / 2)] : [topY, bottomY]
+        for (index, line) in lines.enumerated() where index < yPositions.count {
+            drawLine(line, at: NSPoint(x: textX, y: yPositions[index]), maxWidth: bounds.maxX - textX - 3)
+        }
+    }
+
+    private func drawColumns(textX: CGFloat, midY: CGFloat, rowHeight: CGFloat) {
+        let y = floor(midY - rowHeight / 2)
+        let availableWidth = max(72, bounds.maxX - textX - 4)
+        let firstWidth = min(max(46, availableWidth * 0.34), 64)
+        let separatorX = textX + firstWidth + 4
+        let secondX = separatorX + 7
+
+        drawLine(lines[0], at: NSPoint(x: textX, y: y), maxWidth: firstWidth)
+
+        let separator = NSBezierPath()
+        separator.move(to: NSPoint(x: separatorX, y: midY - 8))
+        separator.line(to: NSPoint(x: separatorX, y: midY + 8))
+        separator.lineWidth = 0.7
+        NSColor.separatorColor.withAlphaComponent(0.45).setStroke()
+        separator.stroke()
+
+        drawLine(lines[1], at: NSPoint(x: secondX, y: y), maxWidth: bounds.maxX - secondX - 3)
+    }
+
+    private func drawSplitRows(textX: CGFloat, topY: CGFloat, bottomY: CGFloat) {
+        let availableWidth = max(100, bounds.maxX - textX - 4)
+        let leadingWidth = min(max(52, availableWidth * 0.34), 68)
+        let separatorX = textX + leadingWidth + 5
+        let trailingX = separatorX + 8
+        let trailingWidth = bounds.maxX - trailingX - 3
+        let yPositions = [topY, bottomY]
+
+        for (index, line) in leadingLines.enumerated() where index < yPositions.count {
+            drawLine(line, at: NSPoint(x: textX, y: yPositions[index]), maxWidth: leadingWidth)
+        }
+
+        let separator = NSBezierPath()
+        separator.move(to: NSPoint(x: separatorX, y: topY - 1))
+        separator.line(to: NSPoint(x: separatorX, y: bottomY + 10))
+        separator.lineWidth = 0.7
+        NSColor.separatorColor.withAlphaComponent(0.45).setStroke()
+        separator.stroke()
+
+        for (index, line) in trailingLines.enumerated() where index < yPositions.count {
+            drawLine(line, at: NSPoint(x: trailingX, y: yPositions[index]), maxWidth: trailingWidth)
+        }
     }
 
     private func drawPulseIcon(midY: CGFloat) {
@@ -69,25 +184,30 @@ final class StackedStatusItemView: NSView {
         NSBezierPath(ovalIn: dotRect).fill()
     }
 
-    private func drawLine(_ text: String, at point: NSPoint, color: NSColor) {
-        let arrow = String(text.prefix(1))
-        let value = String(text.dropFirst())
+    private func drawLine(_ line: StatusItemLine, at point: NSPoint, maxWidth: CGFloat) {
         let font = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .semibold)
 
-        arrow.draw(
+        line.symbol.draw(
             at: point,
             withAttributes: [
                 .font: font,
-                .foregroundColor: color,
+                .foregroundColor: line.color,
             ]
         )
 
-        value.draw(
-            at: NSPoint(x: point.x + 9, y: point.y),
-            withAttributes: [
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.lineBreakMode = .byTruncatingTail
+        NSAttributedString(
+            string: line.text,
+            attributes: [
                 .font: font,
                 .foregroundColor: NSColor.controlTextColor,
+                .paragraphStyle: paragraphStyle,
             ]
+        )
+        .draw(
+            with: NSRect(x: point.x + 9, y: point.y, width: max(8, maxWidth - 9), height: 12),
+            options: [.usesLineFragmentOrigin]
         )
     }
 
@@ -100,8 +220,8 @@ final class StackedStatusItemView: NSView {
         }
     }
 
-    private static func statusLine(prefix: String, bytes: Int64) -> String {
+    private static func statusLine(bytes: Int64) -> String {
         let (value, unit) = Fmt.bytesPerSec(bytes)
-        return "\(prefix) \(value)\(unit)"
+        return "\(value)\(unit)"
     }
 }

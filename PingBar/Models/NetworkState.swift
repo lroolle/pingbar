@@ -28,6 +28,7 @@ final class NetworkState: ObservableObject {
     @Published var proxyEndpoint: PublicEndpointInfo?
     @Published var proxyProbeResults: [ProxyProbeResult] = []
     @Published var egressRoutes: [EgressRouteResult] = []
+    @Published var egressTraceResults: [EgressTraceResult] = []
     @Published var isRefreshingPublicIPs = false
 
     @Published var speedTestResult: NativeSpeedResult?
@@ -38,6 +39,11 @@ final class NetworkState: ObservableObject {
     @Published var speedTestHistory: [SpeedTestHistoryEntry] = []
     @Published var topNetworkProcesses: [NetworkProcessSample] = []
     @Published var applicationProbeResults: [ApplicationProbeResult] = []
+    @Published var trafficUsageRecords: [NetworkTrafficUsage] = []
+    @Published var trafficUsageBuckets: [NetworkTrafficUsageBucket] = []
+    @Published var currentTrafficIdentity: NetworkTrafficIdentity?
+    @Published var networkMetricSummaries: [NetworkMetricSummary] = []
+    @Published var recentNetworkMetricSamples: [NetworkMetricSample] = []
     private var dismissedWarningIDs = Set<String>()
 
     var downloadHistory = HistoryBuffer<Double>(capacity: 300)
@@ -46,6 +52,26 @@ final class NetworkState: ObservableObject {
     var latencySampleHistory: [String: HistoryBuffer<LatencySample>] = [:]
 
     let config = AppConfig.shared
+
+    var recentThroughputAggregate: ThroughputAggregate? {
+        let sampleCount = max(2, min(120, Int(60 / max(config.throughputInterval, 0.5))))
+        let uploads = Array(uploadHistory.values.suffix(sampleCount))
+        let downloads = Array(downloadHistory.values.suffix(sampleCount))
+        guard !uploads.isEmpty, !downloads.isEmpty else { return nil }
+
+        let avgUpload = uploads.reduce(0, +) / Double(uploads.count)
+        let avgDownload = downloads.reduce(0, +) / Double(downloads.count)
+        let observedWindow = Int(round(Double(min(uploads.count, downloads.count)) * config.throughputInterval))
+
+        return ThroughputAggregate(
+            sampleCount: min(uploads.count, downloads.count),
+            windowSeconds: min(60, max(1, observedWindow)),
+            averageUpload: Int64(avgUpload),
+            averageDownload: Int64(avgDownload),
+            peakUpload: Int64(uploads.max() ?? 0),
+            peakDownload: Int64(downloads.max() ?? 0)
+        )
+    }
 
     var health: NetworkHealth {
         let criticals = activeWarnings.filter { $0.severity == .critical }.count
@@ -76,6 +102,9 @@ final class NetworkState: ObservableObject {
     private let publicIPReader = PublicIPReader()
     private let processNetworkReader = ProcessNetworkReader()
     private let applicationProbeReader = ApplicationProbeReader()
+    private let egressTraceReader = EgressTraceReader()
+    private let trafficUsageStore = TrafficUsageStore()
+    private let networkMetricStore = NetworkMetricStore()
     let speedTestRunner = SpeedTestRunner()
 
     private var throughputTimer: Timer?
@@ -85,6 +114,7 @@ final class NetworkState: ObservableObject {
     private var interfaceTimer: Timer?
     private var processTimer: Timer?
     private var applicationProbeTimer: Timer?
+    private var egressTraceTimer: Timer?
 
     private let throughputQueue = DispatchQueue(label: "pingbar.readers.throughput", qos: .utility)
     private let pingQueue = DispatchQueue(label: "pingbar.readers.ping", qos: .utility)
@@ -92,10 +122,20 @@ final class NetworkState: ObservableObject {
     private let processQueue = DispatchQueue(label: "pingbar.readers.processes", qos: .utility)
     private var isPinging = false
     private var isReadingApplicationProbes = false
+    private var isReadingEgressTraces = false
+    private var publicIPRefreshGeneration: UInt64 = 0
+    private var pendingPublicIPRefresh = false
     private var currentSpeedTestRunID: UUID?
+    private let warningMetricWindow: TimeInterval = 5 * 60
 
     init() {
         loadSpeedTestHistory()
+        let trafficSnapshot = trafficUsageStore.currentSnapshot
+        trafficUsageRecords = trafficSnapshot.records
+        trafficUsageBuckets = trafficSnapshot.buckets
+        let metricSnapshot = networkMetricStore.currentSnapshot
+        recentNetworkMetricSamples = metricSnapshot.samples
+        networkMetricSummaries = metricSnapshot.summaries
         refreshInterfaceInfo()
         wifiReader.requestLocationAccess()
         startReaders()
@@ -103,11 +143,11 @@ final class NetworkState: ObservableObject {
     }
 
     deinit {
-        [throughputTimer, pingTimer, wifiTimer, proxyTimer, interfaceTimer, processTimer, applicationProbeTimer].forEach { $0?.invalidate() }
+        [throughputTimer, pingTimer, wifiTimer, proxyTimer, interfaceTimer, processTimer, applicationProbeTimer, egressTraceTimer].forEach { $0?.invalidate() }
     }
 
     func restartReaders() {
-        [throughputTimer, pingTimer, wifiTimer, proxyTimer, interfaceTimer, processTimer, applicationProbeTimer].forEach { $0?.invalidate() }
+        [throughputTimer, pingTimer, wifiTimer, proxyTimer, interfaceTimer, processTimer, applicationProbeTimer, egressTraceTimer].forEach { $0?.invalidate() }
         startReaders()
     }
 
@@ -133,6 +173,11 @@ final class NetworkState: ObservableObject {
             latencyHistory.removeAll()
             latencySampleHistory.removeAll()
         }
+
+        if previousInterface != nil, previousInterface != interface {
+            wifiInfo = nil
+        }
+        currentTrafficIdentity = trafficIdentity(interface: interface)
     }
 
     private func startReaders() {
@@ -164,11 +209,16 @@ final class NetworkState: ObservableObject {
             self?.readApplicationProbes()
         }
 
+        egressTraceTimer = Timer.scheduledTimer(withTimeInterval: config.networkDetailsInterval, repeats: true) { [weak self] _ in
+            self?.readEgressTraces()
+        }
+
         readThroughput()
         readWiFi()
         readProxy()
         readNetworkProcesses()
         readApplicationProbes()
+        readEgressTraces()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
             self?.readPing()
         }
@@ -181,11 +231,22 @@ final class NetworkState: ObservableObject {
             let sample = reader.read(interface: iface)
             DispatchQueue.main.async {
                 guard let self else { return }
+                guard self.cachedInterface == iface else { return }
+                let identity = self.trafficIdentity(interface: iface)
                 self.uploadBytesPerSec = sample.upload
                 self.downloadBytesPerSec = sample.download
                 self.downloadHistory.append(Double(sample.download))
                 self.uploadHistory.append(Double(sample.upload))
                 if sample.linkSpeed > 0 { self.linkSpeed = sample.linkSpeed }
+                if let identity {
+                    self.currentTrafficIdentity = identity
+                    let snapshot = self.trafficUsageStore.record(sample: sample, identity: identity)
+                    self.trafficUsageRecords = snapshot.records
+                    self.trafficUsageBuckets = snapshot.buckets
+                    if let metric = NetworkMetricSample.throughput(date: Date(), sample: sample, identity: identity) {
+                        self.recordNetworkMetrics([metric])
+                    }
+                }
             }
         }
     }
@@ -217,6 +278,9 @@ final class NetworkState: ObservableObject {
 
             DispatchQueue.main.async {
                 guard let self else { return }
+                let sampleDate = Date()
+                let identity = self.currentTrafficIdentity
+                var metricSamples: [NetworkMetricSample] = []
                 for measurement in ordered {
                     let host = measurement.host
                     let label = measurement.label
@@ -237,7 +301,16 @@ final class NetworkState: ObservableObject {
                         self.latencySampleHistory[host]?.append(LatencySample(date: Date(), latencyMs: nil))
                     }
                     self.pingResults[host] = result
+                    metricSamples.append(NetworkMetricSample.latency(
+                        date: sampleDate,
+                        host: host,
+                        label: label,
+                        latencyMs: ms,
+                        isGateway: host == self.cachedGateway,
+                        identity: identity
+                    ))
                 }
+                self.recordNetworkMetrics(metricSamples)
                 self.isPinging = false
                 self.evaluateWarnings()
             }
@@ -251,10 +324,62 @@ final class NetworkState: ObservableObject {
             let info = reader.read(interface: iface)
             DispatchQueue.main.async {
                 guard let self else { return }
+                guard self.cachedInterface == iface else { return }
+                let previousID = self.currentTrafficIdentity?.id
                 self.wifiInfo = info
+                let nextIdentity = self.trafficIdentity(interface: iface)
+                self.currentTrafficIdentity = nextIdentity
+                if let previousID,
+                   let nextID = nextIdentity?.id,
+                   previousID != nextID {
+                    self.resetThroughputBaseline()
+                }
+                if let info,
+                   let metric = NetworkMetricSample.wifiSignal(date: Date(), info: info, identity: nextIdentity) {
+                    self.recordNetworkMetrics([metric])
+                }
                 self.evaluateWarnings()
             }
         }
+    }
+
+    private func trafficIdentity(interface: String?) -> NetworkTrafficIdentity? {
+        guard let interface else { return nil }
+        return NetworkTrafficIdentity(
+            interfaceName: interface,
+            interfaceLabel: cachedInterfaceLabel,
+            wifiInfo: wifiInfo
+        )
+    }
+
+    private func resetThroughputBaseline() {
+        let reader = throughputReader
+        throughputQueue.async {
+            reader.reset()
+        }
+    }
+
+    func clearTrafficUsage() {
+        let snapshot = trafficUsageStore.reset()
+        trafficUsageRecords = snapshot.records
+        trafficUsageBuckets = snapshot.buckets
+    }
+
+    func flushTrafficUsage() {
+        trafficUsageStore.flush()
+    }
+
+    func flushNetworkMetrics() {
+        networkMetricStore.flush()
+    }
+
+    func trafficUsageAggregates(groupedBy aggregation: NetworkTrafficAggregation) -> [NetworkTrafficAggregate] {
+        NetworkTrafficAggregate.make(
+            records: trafficUsageRecords,
+            buckets: trafficUsageBuckets,
+            groupedBy: aggregation,
+            currentIdentity: currentTrafficIdentity
+        )
     }
 
     private func readProxy() {
@@ -289,11 +414,23 @@ final class NetworkState: ObservableObject {
         readApplicationProbes()
     }
 
+    func reloadEgressTraceTargets() {
+        let activeIDs = Set(config.egressTraceTargets.filter(\.enabled).map(\.id))
+        egressTraceResults = egressTraceResults.filter { activeIDs.contains($0.id) }
+        readEgressTraces()
+    }
+
+    func refreshEgressTraces() {
+        readEgressTraces()
+    }
+
     private func readApplicationProbes() {
         guard !isReadingApplicationProbes else { return }
         let probes = config.applicationProbes.filter(\.enabled)
         guard !probes.isEmpty else {
             applicationProbeResults = []
+            isReadingApplicationProbes = false
+            evaluateWarnings()
             return
         }
 
@@ -303,26 +440,89 @@ final class NetworkState: ObservableObject {
             let results = await reader.read(probes)
             await MainActor.run { [weak self] in
                 guard let self else { return }
-                self.applicationProbeResults = results
+                let activeProbes = self.config.applicationProbes.filter(\.enabled)
+                guard activeProbes == probes else {
+                    self.isReadingApplicationProbes = false
+                    self.readApplicationProbes()
+                    return
+                }
+                let activeIDs = Set(activeProbes.map(\.id))
+                let filteredResults = results.filter { activeIDs.contains($0.id) }
+                self.applicationProbeResults = filteredResults
+                let identity = self.currentTrafficIdentity
+                let metricSamples = filteredResults.flatMap { result in
+                    [NetworkMetricSample.applicationProbe(result, identity: identity)]
+                        + NetworkMetricSample.applicationProbePhaseSamples(result, identity: identity)
+                }
+                self.recordNetworkMetrics(metricSamples)
                 self.isReadingApplicationProbes = false
+                self.evaluateWarnings()
+            }
+        }
+    }
+
+    private func readEgressTraces() {
+        guard !isReadingEgressTraces else { return }
+        let targets = config.egressTraceTargets.filter(\.enabled)
+        guard !targets.isEmpty else {
+            egressTraceResults = []
+            isReadingEgressTraces = false
+            return
+        }
+
+        isReadingEgressTraces = true
+        let reader = egressTraceReader
+        Task { [weak self] in
+            let results = await reader.read(targets)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                let activeTargets = self.config.egressTraceTargets.filter(\.enabled)
+                guard activeTargets == targets else {
+                    self.isReadingEgressTraces = false
+                    self.readEgressTraces()
+                    return
+                }
+                let activeIDs = Set(activeTargets.map(\.id))
+                self.egressTraceResults = results.filter { activeIDs.contains($0.id) }
+                self.isReadingEgressTraces = false
             }
         }
     }
 
     func refreshPublicIPs() {
-        guard !isRefreshingPublicIPs else { return }
+        publicIPRefreshGeneration &+= 1
+        let generation = publicIPRefreshGeneration
+        guard !isRefreshingPublicIPs else {
+            pendingPublicIPRefresh = true
+            return
+        }
         isRefreshingPublicIPs = true
+        pendingPublicIPRefresh = false
+        let proxyReader = proxyReader
+        let publicIPReader = publicIPReader
+        let publicIPFamily = config.publicIPFamily
+        let publicIPContext = PublicIPProbeContext(
+            providers: config.publicIPProviders,
+            ipInfoToken: config.ipInfoToken
+        )
+        let probes = config.proxyProbes.filter(\.enabled)
         Task { [weak self] in
-            guard let self else { return }
-            let status = self.proxyReader.read()
-            let publicIPFamily = self.config.publicIPFamily
-            let probes = self.config.proxyProbes.filter(\.enabled)
-            let reader = self.publicIPReader
-            async let direct = self.publicIPReader.fetchDirectEvidence(family: publicIPFamily)
-            async let proxy = self.publicIPReader.fetchProxyEvidence(family: publicIPFamily)
+            let status = proxyReader.read()
+            async let direct = publicIPReader.fetchDirectEvidence(
+                family: publicIPFamily,
+                context: publicIPContext
+            )
+            async let proxy = publicIPReader.fetchProxyEvidence(
+                family: publicIPFamily,
+                context: publicIPContext
+            )
             let (directEvidence, proxyEvidence) = await (direct, proxy)
-            let configured = await self.fetchConfiguredProxyEndpoints(probes, reader: reader)
-            let routes = self.makeEgressRoutes(
+            let configured = await Self.fetchConfiguredProxyEndpoints(
+                probes,
+                reader: publicIPReader,
+                context: publicIPContext
+            )
+            let routes = Self.makeEgressRoutes(
                 directEvidence: directEvidence,
                 proxyEvidence: proxyEvidence,
                 configured: configured,
@@ -330,6 +530,15 @@ final class NetworkState: ObservableObject {
                 publicIPFamily: publicIPFamily
             )
             await MainActor.run {
+                guard let self else { return }
+                guard generation == self.publicIPRefreshGeneration else {
+                    self.isRefreshingPublicIPs = false
+                    if self.pendingPublicIPRefresh {
+                        self.pendingPublicIPRefresh = false
+                        self.refreshPublicIPs()
+                    }
+                    return
+                }
                 self.directEndpoint = directEvidence.primaryEndpoint
                 self.proxyEndpoint = proxyEvidence.primaryEndpoint
                 self.proxyProbeResults = configured
@@ -342,23 +551,28 @@ final class NetworkState: ObservableObject {
                 self.proxyStatus = merged
                 self.isRefreshingPublicIPs = false
                 self.evaluateWarnings()
+                if self.pendingPublicIPRefresh {
+                    self.pendingPublicIPRefresh = false
+                    self.refreshPublicIPs()
+                }
             }
         }
     }
 
-    private func fetchConfiguredProxyEndpoints(
+    private static func fetchConfiguredProxyEndpoints(
         _ probes: [ProxyProbe],
-        reader: PublicIPReader
+        reader: PublicIPReader,
+        context: PublicIPProbeContext
     ) async -> [ProxyProbeResult] {
         var results: [ProxyProbeResult] = []
         for probe in probes {
-            let evidence = await reader.fetchEvidence(via: probe)
+            let evidence = await reader.fetchEvidence(via: probe, context: context)
             results.append(ProxyProbeResult(probe: probe, endpoint: evidence.primaryEndpoint, evidence: evidence))
         }
         return results
     }
 
-    private func makeEgressRoutes(
+    private static func makeEgressRoutes(
         directEvidence: PublicIPEvidence,
         proxyEvidence: PublicIPEvidence,
         configured: [ProxyProbeResult],
@@ -413,6 +627,7 @@ final class NetworkState: ObservableObject {
                     self.isSpeedTestRunning = false
                     self.currentSpeedTestRunID = nil
                     self.saveSpeedTestResult(result, preset: preset, noProxy: noProxy)
+                    self.recordSpeedTestMetrics(result, noProxy: noProxy)
                 }
             } catch {
                 await MainActor.run { [weak self] in
@@ -436,11 +651,101 @@ final class NetworkState: ObservableObject {
             pingResults: pingResults,
             wifiInfo: wifiInfo,
             proxyStatus: proxyStatus,
-            gateway: cachedGateway
+            gateway: cachedGateway,
+            applicationProbeResults: applicationProbeResults,
+            metricSummaries: warningMetricSummaries,
+            thresholds: warningThresholds
         )
         activeWarnings = warnings.filter { !dismissedWarningIDs.contains($0.id) }
         let currentIDs = Set(warnings.map(\.id))
         dismissedWarningIDs = dismissedWarningIDs.intersection(currentIDs)
+    }
+
+    private var warningThresholds: WarningEngine.Thresholds {
+        var thresholds = WarningEngine.defaultThresholds
+        thresholds.gatewayLatencyCaution = config.gatewayLatencyCaution
+        thresholds.gatewayLatencyCritical = config.gatewayLatencyCritical
+        thresholds.externalLatencyCaution = config.externalLatencyCaution
+        thresholds.externalLatencyCritical = config.externalLatencyCritical
+        thresholds.packetLossCaution = config.packetLossCaution
+        thresholds.packetLossCritical = config.packetLossCritical
+        thresholds.appDirectLatencyCaution = config.appDirectLatencyCaution
+        thresholds.appDirectLatencyCritical = config.appDirectLatencyCritical
+        thresholds.appSystemLatencyCaution = config.appSystemLatencyCaution
+        thresholds.appSystemLatencyCritical = config.appSystemLatencyCritical
+        return thresholds
+    }
+
+    private var warningMetricSummaries: [NetworkMetricSummary] {
+        currentNetworkMetricSummaries(from: networkMetricStore.summaries(window: warningMetricWindow))
+    }
+
+    private func metricSummaries(window: TimeInterval) -> [NetworkMetricSummary] {
+        currentNetworkMetricSummaries(from: networkMetricStore.summaries(window: window))
+    }
+
+    var currentNetworkMetricSummaries: [NetworkMetricSummary] {
+        currentNetworkMetricSummaries(from: networkMetricSummaries)
+    }
+
+    private func currentNetworkMetricSummaries(from summaries: [NetworkMetricSummary]) -> [NetworkMetricSummary] {
+        NetworkMetricFilters.currentNetworkSummaries(
+            summaries,
+            currentNetworkID: currentTrafficIdentity?.id
+        )
+    }
+
+    private func recordNetworkMetrics(_ samples: [NetworkMetricSample]) {
+        guard !samples.isEmpty else { return }
+        let snapshot = networkMetricStore.record(samples)
+        recentNetworkMetricSamples = snapshot.samples
+        networkMetricSummaries = snapshot.summaries
+    }
+
+    private func recordSpeedTestMetrics(_ result: NativeSpeedResult, noProxy: Bool) {
+        let date = Date()
+        let identity = currentTrafficIdentity
+        var samples = [
+            NetworkMetricSample.speedTest(
+                date: date,
+                kind: .speedTestLatency,
+                value: result.latencyMs,
+                server: result.server,
+                location: result.location,
+                status: result.status,
+                identity: identity,
+                noProxy: noProxy
+            ),
+        ]
+        if result.downloadBps > 0 {
+            samples.append(NetworkMetricSample.speedTest(
+                date: date,
+                kind: .speedTestDownload,
+                value: Double(result.downloadBps),
+                server: result.server,
+                location: result.location,
+                status: result.status,
+                identity: identity,
+                noProxy: noProxy
+            ))
+        }
+        if result.uploadBps > 0 {
+            samples.append(NetworkMetricSample.speedTest(
+                date: date,
+                kind: .speedTestUpload,
+                value: Double(result.uploadBps),
+                server: result.server,
+                location: result.location,
+                status: result.status,
+                identity: identity,
+                noProxy: noProxy
+            ))
+        }
+        recordNetworkMetrics(samples)
+    }
+
+    func refreshWarnings() {
+        evaluateWarnings()
     }
 
     func clearWarnings() {
@@ -554,6 +859,30 @@ final class NetworkState: ObservableObject {
             latencySampleHistory[host]?.values.filter { $0.isLoss }.count ?? 0
         }
 
+        func appendMetricSummary(_ summary: NetworkMetricSummary, indent: String = "  ") {
+            lines.append("\(indent)\(summary.kind.label): \(summary.sourceName)")
+            lines.append("\(indent)  Samples: \(summary.sampleCount)  failures: \(summary.failureCount) (\(Fmt.packetLoss(summary.failureRate)))")
+            if let median = summary.median, let p95 = summary.p95 {
+                lines.append("\(indent)  Median: \(NetworkMetricDiagnostics.formattedValue(median, unit: summary.unit))  P95: \(NetworkMetricDiagnostics.formattedValue(p95, unit: summary.unit))")
+            } else if let latest = summary.latestValue {
+                lines.append("\(indent)  Latest: \(NetworkMetricDiagnostics.formattedValue(latest, unit: summary.unit))")
+            }
+            if let jitter = summary.jitter, summary.unit == .milliseconds {
+                lines.append("\(indent)  Jitter: \(NetworkMetricDiagnostics.formattedValue(jitter, unit: summary.unit))")
+            }
+            if let secondary = summary.secondaryAverage {
+                let label = summary.kind == .throughput ? "upload avg" : "secondary avg"
+                lines.append("\(indent)  \(label): \(NetworkMetricDiagnostics.formattedValue(secondary, unit: summary.unit))")
+            }
+            let phaseText = NetworkMetricDiagnostics.applicationPhaseLabels(
+                samples: recentNetworkMetricSamples,
+                summary: summary
+            )
+            if !phaseText.isEmpty {
+                lines.append("\(indent)  App phases: \(phaseText.joined(separator: "  "))")
+            }
+        }
+
         lines.append("PingBar Network Evidence Report")
         lines.append("Generated: \(ISO8601DateFormatter().string(from: Date()))")
         lines.append("")
@@ -620,11 +949,98 @@ final class NetworkState: ObservableObject {
         }
         lines.append("")
 
+        if !egressTraceResults.isEmpty {
+            lines.append("== Destination Traces ==")
+            for result in egressTraceResults {
+                let route = result.target.route.label
+                lines.append("  \(result.target.displayName) [\(route)]")
+                lines.append("    URL: \(result.target.url)")
+                if let endpoint = result.endpoint {
+                    lines.append("    IP:  \(endpoint.ip)")
+                    if let flag = endpoint.flagEmoji, let country = endpoint.countryCode {
+                        lines.append("    Country: \(flag) \(country)")
+                    }
+                    if let colo = endpoint.colo, !colo.isEmpty {
+                        lines.append("    CF Colo: \(colo)")
+                    }
+                    if let warp = endpoint.warpLabel {
+                        lines.append("    WARP: \(warp)")
+                    }
+                    if let gateway = endpoint.gatewayLabel {
+                        lines.append("    Gateway: \(gateway)")
+                    }
+                    if let http = endpoint.httpProtocol, !http.isEmpty {
+                        lines.append("    HTTP: \(http)")
+                    }
+                } else {
+                    lines.append("    Error: \(result.error ?? "No response")")
+                }
+            }
+            lines.append("")
+        }
+
         lines.append("== Throughput ==")
         lines.append("  Download: \(Fmt.throughputCompact(downloadBytesPerSec))")
         lines.append("  Upload:   \(Fmt.throughputCompact(uploadBytesPerSec))")
+        if let aggregate = recentThroughputAggregate {
+            lines.append("  Recent \(aggregate.windowSeconds)s avg: ↓\(Fmt.throughputCompact(aggregate.averageDownload)) ↑\(Fmt.throughputCompact(aggregate.averageUpload))")
+            lines.append("  Recent \(aggregate.windowSeconds)s peak: ↓\(Fmt.throughputCompact(aggregate.peakDownload)) ↑\(Fmt.throughputCompact(aggregate.peakUpload))")
+        }
         if linkSpeed > 0 { lines.append("  Link:     \(Int(linkSpeed)) Mbps") }
+        if !trafficUsageRecords.isEmpty || !trafficUsageBuckets.isEmpty {
+            lines.append("  Accumulated by network:")
+            for aggregate in trafficUsageAggregates(groupedBy: .network).prefix(5) {
+                let marker = aggregate.isCurrent ? " *" : ""
+                lines.append("    \(aggregate.displayName)\(marker): ↓\(Fmt.bytes(aggregate.downloadBytes)) ↑\(Fmt.bytes(aggregate.uploadBytes))  total \(Fmt.bytes(aggregate.totalBytes))  (\(aggregate.detail))")
+            }
+            let ssidAggregates = trafficUsageAggregates(groupedBy: .ssid)
+            if !ssidAggregates.isEmpty {
+                lines.append("  By SSID:")
+                for aggregate in ssidAggregates.prefix(3) {
+                    lines.append("    \(aggregate.displayName): ↓\(Fmt.bytes(aggregate.downloadBytes)) ↑\(Fmt.bytes(aggregate.uploadBytes))  total \(Fmt.bytes(aggregate.totalBytes))  (\(aggregate.detail))")
+                }
+            }
+            if !trafficUsageBuckets.isEmpty {
+                lines.append("  Detail: \(trafficUsageBuckets.count) daily buckets retained")
+                for bucket in trafficUsageBuckets.prefix(5) {
+                    lines.append("    \(bucket.day) \(bucket.networkDisplayName): ↓\(Fmt.bytes(bucket.downloadBytes)) ↑\(Fmt.bytes(bucket.uploadBytes))  total \(Fmt.bytes(bucket.totalBytes))")
+                }
+            }
+        }
         lines.append("")
+
+        let recentSummaries = currentNetworkMetricSummaries
+        if !recentSummaries.isEmpty {
+            lines.append("== Recent Metric Rollups ==")
+            lines.append("  Window: recent 15 minutes")
+            for summary in recentSummaries.prefix(10) {
+                appendMetricSummary(summary)
+            }
+            lines.append("")
+        }
+
+        let metricWindows: [(label: String, seconds: TimeInterval)] = [
+            ("15m", 15 * 60),
+            ("1h", 60 * 60),
+            ("24h", 24 * 60 * 60),
+        ]
+        let trendRows = metricWindows.compactMap { window -> (String, [NetworkMetricSummary])? in
+            let summaries = metricSummaries(window: window.seconds)
+                .filter { $0.sampleCount > 0 }
+                .prefix(8)
+            guard !summaries.isEmpty else { return nil }
+            return (window.label, Array(summaries))
+        }
+        if !trendRows.isEmpty {
+            lines.append("== Metric Trend Windows ==")
+            for row in trendRows {
+                lines.append("  Window: \(row.0)")
+                for summary in row.1 {
+                    lines.append("    \(NetworkMetricDiagnostics.compactRollupLine(summary))")
+                }
+            }
+            lines.append("")
+        }
 
         lines.append("== Latency Evidence ==")
         for host in allPingHostOrder {
@@ -694,4 +1110,5 @@ final class NetworkState: ObservableObject {
 
         return lines.joined(separator: "\n")
     }
+
 }

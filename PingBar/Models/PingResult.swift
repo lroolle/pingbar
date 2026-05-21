@@ -72,7 +72,14 @@ struct PingResult: Identifiable {
 
     private var recentPacketLoss: Double {
         guard !outcomes.isEmpty else { return 0 }
-        let lost = outcomes.filter { !$0 }.count
-        return Double(lost) / Double(outcomes.count)
+        return Double(recentLossCount) / Double(outcomes.count)
+    }
+
+    var recentSampleCount: Int {
+        outcomes.count
+    }
+
+    var recentLossCount: Int {
+        outcomes.filter { !$0 }.count
     }
 }

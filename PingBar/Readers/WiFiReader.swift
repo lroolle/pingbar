@@ -26,6 +26,7 @@ final class WiFiReader: NSObject, CLLocationManagerDelegate {
         guard let iface = wifiClient.interface(withName: ifName) else { return nil }
 
         var info = WiFiInfo()
+        info.interfaceName = ifName
         info.ssid = ssid(for: iface)
         info.bssid = iface.bssid()
         info.rssi = iface.rssiValue()

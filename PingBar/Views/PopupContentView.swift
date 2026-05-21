@@ -5,43 +5,39 @@ struct PopupContentView: View {
     @State private var copiedReport = false
 
     var body: some View {
-        ScrollView(.vertical, showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 0) {
-                StatusHeader()
-                    .environmentObject(state)
-                    .padding(.horizontal, 16)
-                    .padding(.top, 12)
-                    .padding(.bottom, 8)
+        VStack(spacing: 0) {
+            StatusHeader(
+                copiedReport: copiedReport,
+                copyAction: copyDiagnostic,
+                pinAction: detachWindow,
+                settingsAction: openSettings
+            )
+            .environmentObject(state)
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 8)
 
-                if !state.activeWarnings.isEmpty {
-                    WarningBanner(
-                        warnings: state.activeWarnings,
-                        clearAction: { state.clearWarnings() }
-                    )
-                        .padding(.horizontal, 16)
-                        .padding(.bottom, 8)
+            Divider().padding(.horizontal, 16)
+
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 0) {
+                    if !state.activeWarnings.isEmpty {
+                        WarningBanner(
+                            warnings: state.activeWarnings,
+                            clearAction: { state.clearWarnings() }
+                        )
+                            .padding(.horizontal, 16)
+                            .padding(.top, 8)
+                            .padding(.bottom, 8)
+                    }
+
+                    ForEach(visiblePanelSections) { panelSection in
+                        section { panelSectionView(panelSection) }
+                        if panelSection.id != visiblePanelSections.last?.id {
+                            Divider().padding(.horizontal, 16)
+                        }
+                    }
                 }
-
-                Divider().padding(.horizontal, 16)
-                section { ThroughputSection() }
-                Divider().padding(.horizontal, 16)
-                section { PingSection() }
-                Divider().padding(.horizontal, 16)
-                section { WiFiSection() }
-                Divider().padding(.horizontal, 16)
-                section { ProxySection() }
-                Divider().padding(.horizontal, 16)
-                section { SpeedTestSection() }
-
-                if !state.speedTestHistory.isEmpty {
-                    Divider().padding(.horizontal, 16)
-                    section { SpeedTestHistorySection() }
-                }
-
-                Divider().padding(.horizontal, 16)
-                section { NetworkProcessesSection() }
-
-                footer
             }
         }
         .frame(width: 360)
@@ -49,53 +45,48 @@ struct PopupContentView: View {
         .onAppear { state.loadSpeedTestHistory() }
     }
 
+    private var visiblePanelSections: [PanelSection] {
+        state.config.panelSectionOrder.filter { panelSection in
+            switch panelSection {
+            case .speedHistory:
+                return !state.speedTestHistory.isEmpty
+            default:
+                return true
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func panelSectionView(_ panelSection: PanelSection) -> some View {
+        switch panelSection {
+        case .latency:
+            PingSection()
+        case .metricRollups:
+            NetworkMetricsSection()
+        case .throughput:
+            ThroughputSection()
+        case .trafficUsage:
+            TrafficUsageSection()
+        case .egress:
+            ProxySection()
+        case .wifi:
+            WiFiSection()
+        case .processes:
+            NetworkProcessesSection()
+        case .speedTest:
+            SpeedTestSection()
+        case .speedHistory:
+            if !state.speedTestHistory.isEmpty {
+                SpeedTestHistorySection()
+            }
+        }
+    }
+
     private func section<Content: View>(@ViewBuilder content: () -> Content) -> some View {
         content()
             .environmentObject(state)
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
-    }
-
-    private var footer: some View {
-        HStack(spacing: 12) {
-            Button(action: copyDiagnostic) {
-                HStack(spacing: 3) {
-                    Image(systemName: copiedReport ? "checkmark" : "doc.on.clipboard")
-                    Text(copiedReport ? "Copied" : "Copy Report")
-                }
-                .font(.system(size: 10))
-            }
-            .buttonStyle(.plain)
-            .foregroundColor(copiedReport ? .green : .secondary)
-
-            Button(action: detachWindow) {
-                HStack(spacing: 3) {
-                    Image(systemName: "pin")
-                    Text("Pin")
-                }
-                .font(.system(size: 10))
-            }
-            .buttonStyle(.plain)
-            .foregroundColor(.secondary)
-
-            Button(action: openSettings) {
-                HStack(spacing: 3) {
-                    Image(systemName: "gearshape")
-                    Text("Settings")
-                }
-                .font(.system(size: 10))
-            }
-            .buttonStyle(.plain)
-            .foregroundColor(.secondary)
-
-            Spacer()
-
-            Text("PingBar")
-                .font(.system(size: 9))
-                .foregroundColor(.quaternaryLabelColor)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
     }
 
     private func copyDiagnostic() {
@@ -121,6 +112,10 @@ struct PopupContentView: View {
 
 struct StatusHeader: View {
     @EnvironmentObject var state: NetworkState
+    let copiedReport: Bool
+    let copyAction: () -> Void
+    let pinAction: () -> Void
+    let settingsAction: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -144,6 +139,16 @@ struct StatusHeader: View {
 
                 Spacer()
 
+                headerButton(
+                    copiedReport ? "Copied" : "Copy Report",
+                    systemImage: copiedReport ? "checkmark" : "doc.on.clipboard",
+                    color: copiedReport ? .green : .secondary,
+                    action: copyAction
+                )
+
+                headerButton("Pin", systemImage: "pin", action: pinAction)
+                headerButton("Settings", systemImage: "gearshape", action: settingsAction)
+
                 Circle()
                     .fill(healthColor)
                     .frame(width: 8, height: 8)
@@ -164,6 +169,22 @@ struct StatusHeader: View {
                 }
             }
         }
+    }
+
+    private func headerButton(
+        _ title: String,
+        systemImage: String,
+        color: Color = .secondary,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 11, weight: .semibold))
+                .frame(width: 20, height: 20)
+        }
+        .buttonStyle(.plain)
+        .foregroundColor(color)
+        .help(title)
     }
 
     private func headerPill(_ text: String, systemImage: String) -> some View {

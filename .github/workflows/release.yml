@@ -1,0 +1,116 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  dmg:
+    name: Build signed DMG
+    runs-on: macos-26
+
+    env:
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      DEVELOPER_ID_APPLICATION: ${{ secrets.DEVELOPER_ID_APPLICATION }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          xcode_265_target="$(readlink /Applications/Xcode_26.5.app 2>/dev/null || true)"
+          if [ -d /Applications/Xcode_26.5.app ] && ! echo "$xcode_265_target" | grep -qi beta; then
+            sudo xcode-select -s /Applications/Xcode_26.5.app/Contents/Developer
+          elif [ -d /Applications/Xcode_26.4.1.app ]; then
+            sudo xcode-select -s /Applications/Xcode_26.4.1.app/Contents/Developer
+          else
+            sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          fi
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Validate release secrets
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          required=(
+            APPLE_TEAM_ID
+            APPLE_ID
+            APPLE_APP_SPECIFIC_PASSWORD
+            DEVELOPER_ID_APPLICATION
+            MACOS_CERTIFICATE_P12
+            MACOS_CERTIFICATE_PASSWORD
+          )
+          for name in "${required[@]}"; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing secret $name"
+              exit 1
+            fi
+          done
+
+      - name: Import Developer ID certificate
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain_password="$(uuidgen)"
+          keychain_path="$RUNNER_TEMP/app-signing.keychain-db"
+          certificate_path="$RUNNER_TEMP/developer-id.p12"
+
+          printf '%s' "$MACOS_CERTIFICATE_P12" | base64 -D > "$certificate_path"
+
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" \
+            -k "$keychain_path" \
+            -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security \
+            -T /usr/bin/productsign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+          security default-keychain -s "$keychain_path"
+          security find-identity -v -p codesigning "$keychain_path"
+
+      - name: Check toolchain
+        run: make doctor
+
+      - name: Test
+        run: make test
+
+      - name: Build signed DMG
+        run: VERSION="${GITHUB_REF_NAME#v}" make release-dmg
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pingbar-release
+          path: |
+            build/releases/*.dmg
+            build/releases/*.sha256
+          if-no-files-found: error
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            build/releases/*.dmg \
+            build/releases/*.sha256 \
+            --title "PingBar ${GITHUB_REF_NAME#v}" \
+            --verify-tag \
+            --generate-notes
+
+      - name: Delete signing keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/app-signing.keychain-db" || true

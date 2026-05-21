@@ -3,6 +3,8 @@ import SwiftUI
 struct ProxySection: View {
     @EnvironmentObject var state: NetworkState
     @State private var refreshRotation = 0.0
+    @State private var showAllRoutes = false
+    @State private var showEvidence = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
@@ -28,6 +30,7 @@ struct ProxySection: View {
             localLinkSummary
             systemRouteSummary
             publicEgressSummary
+            destinationTraceSummary
         }
     }
 
@@ -143,15 +146,51 @@ struct ProxySection: View {
                     .foregroundColor(.secondary)
             } else {
                 VStack(spacing: 4) {
-                    ForEach(state.egressRoutes) { route in egressRouteRow(route) }
+                    ForEach(visibleRoutes) { route in egressRouteRow(route) }
+                }
+
+                if !extraRoutes.isEmpty {
+                    Button(showAllRoutes ? "Hide proxy routes" : "\(extraRoutes.count) proxy route\(extraRoutes.count == 1 ? "" : "s")") {
+                        withAnimation(.easeInOut(duration: 0.16)) { showAllRoutes.toggle() }
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 14)
                 }
             }
 
             if let note = tunnelNote {
-                Text(note)
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                HStack(alignment: .firstTextBaseline, spacing: 5) {
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 8, weight: .semibold))
+                    Text(note)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .font(.system(size: 9))
+                .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var destinationTraceSummary: some View {
+        let enabledTargets = state.config.egressTraceTargets.filter(\.enabled)
+        if !enabledTargets.isEmpty || !state.egressTraceResults.isEmpty {
+            VStack(alignment: .leading, spacing: 5) {
+                sectionEyebrow("Destination Trace")
+
+                if state.egressTraceResults.isEmpty {
+                    Text("Checking destination trace...")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                } else {
+                    VStack(spacing: 4) {
+                        ForEach(state.egressTraceResults.prefix(3)) { result in
+                            destinationTraceRow(result)
+                        }
+                    }
+                }
             }
         }
     }
@@ -189,7 +228,43 @@ struct ProxySection: View {
                 if let endpoint = route.endpoint {
                     endpointMetadata(endpoint)
                 }
-                routeSources(route)
+                if shouldShowEvidence(for: route) {
+                    routeSources(route)
+                }
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func destinationTraceRow(_ result: EgressTraceResult) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            routeDot(color: result.isHealthy ? .blue : .orange)
+                .padding(.top, 4)
+
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 5) {
+                    Text(result.target.displayName)
+                        .font(.system(size: 10, weight: .semibold))
+                        .lineLimit(1)
+                    Text(result.target.route.label)
+                        .font(.system(size: 8))
+                        .foregroundColor(.secondary)
+                    if let duration = result.durationMs {
+                        Text(Fmt.latency(duration))
+                            .font(.system(size: 8, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                if let endpoint = result.endpoint {
+                    endpointIdentity(ip: endpoint.ip, endpoint: endpoint)
+                    endpointMetadata(endpoint)
+                } else {
+                    Text(result.error ?? "No response")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.orange)
+                        .lineLimit(1)
+                }
             }
         }
         .padding(.vertical, 2)
@@ -213,6 +288,24 @@ struct ProxySection: View {
             .lineLimit(1)
     }
 
+    private var primaryRoutes: [EgressRouteResult] {
+        state.egressRoutes.filter { $0.id == "no-url-proxy" || $0.id == "system-settings" }
+    }
+
+    private var extraRoutes: [EgressRouteResult] {
+        state.egressRoutes.filter { route in
+            route.id != "no-url-proxy" && route.id != "system-settings"
+        }
+    }
+
+    private var visibleRoutes: [EgressRouteResult] {
+        showAllRoutes ? primaryRoutes + extraRoutes : primaryRoutes
+    }
+
+    private func shouldShowEvidence(for route: EgressRouteResult) -> Bool {
+        route.evidence.confidence == .mismatch || showEvidence || showAllRoutes && route.evidence.confidence != .verified
+    }
+
     private func statusBadge(for route: EgressRouteResult) -> some View {
         let status = routeStatus(route)
         return Text(status.label)
@@ -226,9 +319,19 @@ struct ProxySection: View {
     }
 
     private func sectionEyebrow(_ title: String) -> some View {
-        Text(title)
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundColor(.secondary)
+        HStack(spacing: 5) {
+            Text(title)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(.secondary)
+            if title == "Public Egress", !state.egressRoutes.isEmpty {
+                Button(showEvidence ? "Hide evidence" : "Evidence") {
+                    withAnimation(.easeInOut(duration: 0.16)) { showEvidence.toggle() }
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundColor(.secondary.opacity(0.8))
+            }
+        }
     }
 
     private func routeDot(color: Color) -> some View {
@@ -321,5 +424,6 @@ struct ProxySection: View {
     private func refreshEgress() {
         refreshRotation += 360
         state.refreshPublicIPs()
+        state.refreshEgressTraces()
     }
 }
