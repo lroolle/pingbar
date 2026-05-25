@@ -10,7 +10,7 @@ struct WarningBanner: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 6) {
                 Image(systemName: iconName(worstSeverity))
                     .foregroundColor(iconColor(worstSeverity))
@@ -22,18 +22,16 @@ struct WarningBanner: View {
 
                 Spacer()
 
-                if warnings.count > 3 {
-                    Button(expanded ? "Less" : "+\(warnings.count - 3)") {
-                        withAnimation(.easeInOut(duration: 0.16)) { expanded.toggle() }
-                    }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(.secondary)
+                Button(disclosureTitle) {
+                    withAnimation(.easeInOut(duration: 0.16)) { expanded.toggle() }
                 }
+                .buttonStyle(.plain)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(.secondary)
 
                 Button(action: clearAction) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .semibold))
+                    Text("Clear")
+                        .font(.system(size: 10, weight: .medium))
                 }
                 .buttonStyle(.plain)
                 .foregroundColor(.secondary)
@@ -41,6 +39,14 @@ struct WarningBanner: View {
 
             ForEach(visibleWarnings) { warning in
                 warningRow(warning)
+            }
+
+            if expanded {
+                Text("Clear hides current warning IDs until the underlying metric recovers or crosses a different threshold.")
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 2)
             }
         }
         .padding(8)
@@ -85,6 +91,12 @@ struct WarningBanner: View {
             return cautions == 1 ? "1 caution" : "\(cautions) cautions"
         }
         return warnings.count == 1 ? "1 notice" : "\(warnings.count) notices"
+    }
+
+    private var disclosureTitle: String {
+        if expanded { return "Less" }
+        if warnings.count > 3 { return "+\(warnings.count - 3)" }
+        return "Details"
     }
 
     private var bannerBackground: Color {

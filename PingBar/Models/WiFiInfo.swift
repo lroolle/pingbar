@@ -1,6 +1,7 @@
 import Foundation
 
-struct WiFiInfo {
+struct WiFiInfo: Sendable {
+    var interfaceName: String?
     var ssid: String?
     var bssid: String?
     var channel: Int?
@@ -26,7 +27,7 @@ struct WiFiInfo {
         return .poor
     }
 
-    enum SignalQuality: String {
+    enum SignalQuality: String, Sendable {
         case excellent, good, fair, weak, poor, unknown
     }
 }

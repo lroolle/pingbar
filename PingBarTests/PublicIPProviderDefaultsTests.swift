@@ -17,21 +17,63 @@ final class PublicIPProviderDefaultsTests: XCTestCase {
         ])
     }
 
-    func testDefaultIPinfoProvidersUseLegacyJSONEndpoints() {
-        let providers = Dictionary(
-            uniqueKeysWithValues: AppConfig.defaultPublicIPProviders
-                .filter { $0.name.hasPrefix("IPinfo") }
-                .map { ($0.name, $0) }
-        )
+    func testDecodesOlderPublicIPProviderWithoutIDOrOptionalFlags() throws {
+        let data = Data("""
+        {
+          "name": "Trace",
+          "url": "https://www.cloudflare.com/cdn-cgi/trace",
+          "family": "automatic",
+          "parser": "cloudflareTrace",
+          "enabled": true
+        }
+        """.utf8)
 
-        XCTAssertEqual(providers["IPinfo Auto"]?.url, "https://ipinfo.io/json?token={ipinfoToken}")
-        XCTAssertEqual(providers["IPinfo IPv4"]?.url, "https://ipinfo.io/json?token={ipinfoToken}")
-        XCTAssertEqual(providers["IPinfo IPv6"]?.url, "https://v6.ipinfo.io/json?token={ipinfoToken}")
+        let provider = try JSONDecoder().decode(PublicIPProvider.self, from: data)
+
+        XCTAssertFalse(provider.id.isEmpty)
+        XCTAssertEqual(provider.name, "Trace")
+        XCTAssertEqual(provider.parser, .cloudflareTrace)
+        XCTAssertFalse(provider.diagnostic)
+        XCTAssertFalse(provider.requiresIPInfoToken)
+    }
+
+    func testDecodesOlderApplicationProbeWithoutID() throws {
+        let data = Data("""
+        {
+          "name": "Cloudflare",
+          "url": "https://www.cloudflare.com/cdn-cgi/trace",
+          "route": "system",
+          "enabled": true
+        }
+        """.utf8)
+
+        let probe = try JSONDecoder().decode(ApplicationProbe.self, from: data)
+
+        XCTAssertFalse(probe.id.isEmpty)
+        XCTAssertEqual(probe.name, "Cloudflare")
+        XCTAssertEqual(probe.url, "https://www.cloudflare.com/cdn-cgi/trace")
+        XCTAssertEqual(probe.route, .system)
+        XCTAssertTrue(probe.enabled)
+    }
+
+    func testDefaultIPinfoProvidersUseLegacyJSONEndpoints() throws {
+        let providers = AppConfig.defaultPublicIPProviders
+            .filter { $0.name.hasPrefix("IPinfo") }
+            .reduce(into: [String: PublicIPProvider]()) { providers, provider in
+                providers[provider.name] = provider
+            }
+        let auto = try XCTUnwrap(providers["IPinfo Auto"])
+        let ipv4 = try XCTUnwrap(providers["IPinfo IPv4"])
+        let ipv6 = try XCTUnwrap(providers["IPinfo IPv6"])
+
+        XCTAssertEqual(auto.url, "https://ipinfo.io/json?token={ipinfoToken}")
+        XCTAssertEqual(ipv4.url, "https://ipinfo.io/json?token={ipinfoToken}")
+        XCTAssertEqual(ipv6.url, "https://v6.ipinfo.io/json?token={ipinfoToken}")
         XCTAssertTrue(providers.values.allSatisfy { $0.parser == .ipinfoLegacy })
         XCTAssertTrue(providers.values.allSatisfy(\.requiresIPInfoToken))
     }
 
-    func testMigratesPersistedCoreIPinfoProvidersToLegacyJSONEndpoints() {
+    func testMigratesPersistedCoreIPinfoProvidersToLegacyJSONEndpoints() throws {
         let providers = [
             PublicIPProvider(
                 name: "IPinfo Auto",
@@ -60,14 +102,17 @@ final class PublicIPProviderDefaultsTests: XCTestCase {
         ]
 
         let migrated = PublicIPProviderCatalog.normalized(providers)
+        let auto = try XCTUnwrap(migrated.first { $0.name == "IPinfo Auto" })
+        let ipv4 = try XCTUnwrap(migrated.first { $0.name == "IPinfo IPv4" })
+        let ipv6 = try XCTUnwrap(migrated.first { $0.name == "IPinfo IPv6" })
 
-        XCTAssertEqual(migrated[0].url, "https://ipinfo.io/json?token={ipinfoToken}")
-        XCTAssertEqual(migrated[1].url, "https://ipinfo.io/json?token={ipinfoToken}")
-        XCTAssertEqual(migrated[2].url, "https://v6.ipinfo.io/json?token={ipinfoToken}")
+        XCTAssertEqual(auto.url, "https://ipinfo.io/json?token={ipinfoToken}")
+        XCTAssertEqual(ipv4.url, "https://ipinfo.io/json?token={ipinfoToken}")
+        XCTAssertEqual(ipv6.url, "https://v6.ipinfo.io/json?token={ipinfoToken}")
         XCTAssertTrue(migrated.allSatisfy { $0.parser == .ipinfoLegacy })
     }
 
-    func testMigratesCorrectedIPinfoURLsThatStillUseCoreParser() {
+    func testMigratesCorrectedIPinfoURLsThatStillUseCoreParser() throws {
         let providers = [
             PublicIPProvider(
                 name: "IPinfo Auto",
@@ -88,9 +133,11 @@ final class PublicIPProviderDefaultsTests: XCTestCase {
         ]
 
         let migrated = PublicIPProviderCatalog.normalized(providers)
+        let auto = try XCTUnwrap(migrated.first { $0.name == "IPinfo Auto" })
+        let ipv6 = try XCTUnwrap(migrated.first { $0.name == "IPinfo IPv6" })
 
-        XCTAssertEqual(migrated[0].parser, .ipinfoLegacy)
-        XCTAssertEqual(migrated[1].parser, .ipinfoLegacy)
+        XCTAssertEqual(auto.parser, .ipinfoLegacy)
+        XCTAssertEqual(ipv6.parser, .ipinfoLegacy)
     }
 
     func testDoesNotRewriteCustomCoreIPinfoProvider() {
@@ -107,5 +154,17 @@ final class PublicIPProviderDefaultsTests: XCTestCase {
 
         XCTAssertEqual(normalized.url, provider.url)
         XCTAssertEqual(normalized.parser, .ipinfoCore)
+    }
+
+    func testDefaultEgressTraceTargetsAreDestinationSpecific() throws {
+        let targets = AppConfig.defaultEgressTraceTargets
+        let first = try XCTUnwrap(targets.first)
+
+        XCTAssertEqual(first.name, "ChatGPT")
+        XCTAssertEqual(first.url, "https://chatgpt.com/cdn-cgi/trace")
+        XCTAssertEqual(first.route, .system)
+        XCTAssertEqual(first.parser, .cloudflareTrace)
+        XCTAssertEqual(first.showInMenuBar, true)
+        XCTAssertTrue(targets.contains { $0.route == .direct && $0.url == "https://chatgpt.com/cdn-cgi/trace" })
     }
 }

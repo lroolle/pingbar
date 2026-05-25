@@ -44,4 +44,20 @@ enum Fmt {
         let (val, unit) = bytesPerSec(bytes)
         return "\(val) \(unit)"
     }
+
+    static func bytes(_ bytes: Int64) -> String {
+        let value = Double(max(0, bytes))
+        switch value {
+        case 0..<1024:
+            return String(format: "%.0f B", value)
+        case 1024..<(1024 * 1024):
+            return String(format: "%.1f KB", value / 1024)
+        case (1024 * 1024)..<(1024 * 1024 * 1024):
+            return String(format: "%.1f MB", value / (1024 * 1024))
+        case (1024 * 1024 * 1024)..<(1024 * 1024 * 1024 * 1024):
+            return String(format: "%.2f GB", value / (1024 * 1024 * 1024))
+        default:
+            return String(format: "%.2f TB", value / (1024 * 1024 * 1024 * 1024))
+        }
+    }
 }

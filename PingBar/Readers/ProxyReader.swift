@@ -3,7 +3,7 @@ import CFNetwork
 import AppKit
 import SystemConfiguration
 
-final class ProxyReader {
+final class ProxyReader: Sendable {
     private static let knownProxyApps = [
         "ClashX", "ClashX Pro", "clash", "Clash Verge",
         "Surge", "Surge Dashboard",
@@ -64,14 +64,12 @@ final class ProxyReader {
             status.socksProxy = status.socksProxy ?? "\(host):\(port)"
         }
 
-        status.httpProbeRoute = routeDescription(
-            for: URL(string: "http://api.ipify.org/")!,
-            settings: settings
-        )
-        status.httpsProbeRoute = routeDescription(
-            for: URL(string: "https://api64.ipify.org/")!,
-            settings: settings
-        )
+        if let url = URL(string: "http://api.ipify.org/") {
+            status.httpProbeRoute = routeDescription(for: url, settings: settings)
+        }
+        if let url = URL(string: "https://api64.ipify.org/") {
+            status.httpsProbeRoute = routeDescription(for: url, settings: settings)
+        }
     }
 
     private func routeDescription(for url: URL, settings: [String: Any]) -> String? {

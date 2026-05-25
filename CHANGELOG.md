@@ -4,6 +4,12 @@ All notable changes to PingBar will be documented here.
 
 ## Unreleased
 
+## 0.2.0 - 2026-05-21
+
+- Added compact network metric rollups for latency, throughput, Wi-Fi signal, speed tests, and application probe phases.
+- Added persistent traffic and metric stores with focused XCTest coverage.
+- Added egress trace, application probe, public IP, throughput, and traffic usage test coverage.
+- Added signed Developer ID DMG packaging and a tag-triggered GitHub release workflow.
 - Switched the project license from MIT to Apache-2.0.
 - Raised the documented build baseline to Xcode 26 and added a toolchain doctor check.
 - Tightened XcodeGen, Makefile, and CI wiring around the active macOS SDK, Swift 6 compiler, and strict concurrency checking.

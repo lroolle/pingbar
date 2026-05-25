@@ -44,8 +44,8 @@ targets:
         CODE_SIGN_STYLE: Manual
         PRODUCT_BUNDLE_IDENTIFIER: com.lroolle.pingbar
         PRODUCT_NAME: PingBar
-        MARKETING_VERSION: "0.1.0"
-        CURRENT_PROJECT_VERSION: "1"
+        MARKETING_VERSION: "0.2.0"
+        CURRENT_PROJECT_VERSION: "2"
         VERSIONING_SYSTEM: apple-generic
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ENABLE_HARDENED_RUNTIME: true
@@ -60,13 +60,22 @@ targets:
       - path: PingBarTests
       - path: PingBar/Models/AppConfig.swift
       - path: PingBar/Models/EgressRouteResult.swift
+      - path: PingBar/Models/NetworkTrafficUsage.swift
+      - path: PingBar/Models/NetworkMetric.swift
       - path: PingBar/Models/PingResult.swift
       - path: PingBar/Models/ProxyStatus.swift
       - path: PingBar/Models/PublicEndpointInfo.swift
       - path: PingBar/Models/PublicIPProviderCatalog.swift
+      - path: PingBar/Models/ThroughputSample.swift
       - path: PingBar/Models/Warning.swift
       - path: PingBar/Models/WiFiInfo.swift
+      - path: PingBar/Readers/ApplicationProbeReader.swift
+      - path: PingBar/Readers/EgressTraceReader.swift
+      - path: PingBar/Readers/PublicIPReader.swift
+      - path: PingBar/Readers/ThroughputReader.swift
       - path: PingBar/Services/Formatter.swift
+      - path: PingBar/Services/NetworkMetricStore.swift
+      - path: PingBar/Services/TrafficUsageStore.swift
       - path: PingBar/Services/WarningEngine.swift
     settings:
       base:
@@ -74,6 +83,7 @@ targets:
         SWIFT_VERSION: "5.0"
         SWIFT_STRICT_CONCURRENCY: complete
         MACOSX_DEPLOYMENT_TARGET: "13.0"
+        GENERATE_INFOPLIST_FILE: YES
 
 schemes:
   PingBar:

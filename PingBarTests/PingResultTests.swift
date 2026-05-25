@@ -25,5 +25,20 @@ final class PingResultTests: XCTestCase {
         XCTAssertEqual(result.sent, 2)
         XCTAssertEqual(result.received, 1)
         XCTAssertEqual(result.packetLoss, 0.5)
+        XCTAssertEqual(result.recentSampleCount, 2)
+        XCTAssertEqual(result.recentLossCount, 1)
+    }
+
+    func testRecentLossCountersStayBoundedToRecentWindow() {
+        var result = PingResult(id: "cloudflare", host: "1.1.1.1", label: "Cloudflare")
+
+        result.recordTimeout()
+        for _ in 0..<60 {
+            result.record(latency: 20)
+        }
+
+        XCTAssertEqual(result.recentSampleCount, 60)
+        XCTAssertEqual(result.recentLossCount, 0)
+        XCTAssertEqual(result.packetLoss, 0)
     }
 }

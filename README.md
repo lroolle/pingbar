@@ -25,7 +25,7 @@ PingBar is a native macOS menu bar utility for engineers, remote workers, and an
 
 Most network meters stop at "up" and "down." PingBar is built for the next question: is this the Wi-Fi, the gateway, the proxy, the VPN path, a busy app, or the internet?
 
-> Status: early source-first macOS app. Signed releases and App Store hardening are not published yet.
+> Status: early source-first macOS app. Signed DMG releases are built from tags once Developer ID signing secrets are configured.
 
 ## Why PingBar
 
@@ -121,10 +121,13 @@ make build     # Build Debug app into ./build
 make test      # Run XCTest coverage for the pure core logic
 make run       # Build and launch PingBar
 make ci        # Local equivalent of the GitHub Actions build/test path
+make release-dmg VERSION=0.2.0
 make clean
 ```
 
 CI runs the same generated Xcode project on macOS 26 with XcodeGen. The project uses the active Xcode macOS SDK (`SDKROOT = macosx`), the Swift 6 compiler, and Swift 5 language mode with complete strict-concurrency checking enabled as the migration bridge before flipping to Swift 6 language mode.
+
+Release packaging is documented in [docs/releasing.md](docs/releasing.md).
 
 ## Project Structure
 
@@ -147,7 +150,7 @@ Makefile                       Local build/test/run shortcuts
 
 ## Roadmap
 
-- Signed downloadable release.
+- Notarized release smoke test on a clean macOS account.
 - Screenshots and short usage demo captured from the real app.
 - More XCTest coverage around readers and route evidence parsing.
 - Sandbox/App Store review of `ping` and `nettop`-based diagnostics.

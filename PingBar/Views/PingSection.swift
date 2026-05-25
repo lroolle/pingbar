@@ -43,7 +43,7 @@ struct PingSection: View {
                     pingRow(row)
                 }
 
-                if hiddenTargetCount > 0 || showAllTargets && displayRows.count > compactLimit {
+                if hiddenTargetCount > 0 || (showAllTargets && displayRows.count > compactLimit) {
                     Button(action: {
                         withAnimation(.easeInOut(duration: 0.16)) {
                             showAllTargets.toggle()
@@ -184,7 +184,7 @@ struct PingSection: View {
     }
 
     private func applicationProbePill(_ result: ApplicationProbeResult) -> some View {
-        let color: Color = result.isHealthy ? .secondary : .orange
+        let color = applicationProbeColor(result)
         let latency = result.durationMs.map { Fmt.latency($0) } ?? "--"
         return Text("\(result.probe.route.label) \(result.probe.name) \(latency)")
             .font(.system(size: 9, weight: .medium))
@@ -194,6 +194,48 @@ struct PingSection: View {
             .padding(.vertical, 2)
             .background(color.opacity(0.08))
             .cornerRadius(4)
+    }
+
+    private func applicationProbeColor(_ result: ApplicationProbeResult) -> Color {
+        if let summary = applicationSummary(for: result) {
+            switch NetworkMetricDiagnostics.rollupSeverityBand(
+                for: summary,
+                policy: NetworkMetricSeverityPolicy(config: state.config)
+            ) {
+            case .critical:
+                return .red
+            case .caution:
+                return .orange
+            case .good, .neutral:
+                return .secondary
+            }
+        }
+
+        if !result.isHealthy {
+            return .orange
+        }
+
+        if let duration = result.durationMs {
+            let thresholds = applicationProbeThresholds(for: result.probe.route)
+            if duration >= thresholds.critical { return .red }
+            if duration >= thresholds.warning { return .orange }
+        }
+        return .secondary
+    }
+
+    private func applicationSummary(for result: ApplicationProbeResult) -> NetworkMetricSummary? {
+        state.currentNetworkMetricSummaries.first {
+            $0.kind == .applicationLatency && $0.sourceID == result.id
+        }
+    }
+
+    private func applicationProbeThresholds(for route: ApplicationProbeRoute) -> (warning: Double, critical: Double) {
+        switch route {
+        case .direct:
+            return (state.config.appDirectLatencyCaution, state.config.appDirectLatencyCritical)
+        case .system:
+            return (state.config.appSystemLatencyCaution, state.config.appSystemLatencyCritical)
+        }
     }
 
     private func pingRow(_ row: LatencyTargetRow) -> some View {
@@ -253,26 +295,44 @@ struct PingSection: View {
     }
 
     private func isProblem(_ result: PingResult) -> Bool {
-        if result.sent > 0 && !result.isReachable { return true }
-        if result.packetLoss > 0 { return true }
+        if isGateway(result), result.sent > 0 && !result.isReachable { return true }
+        if hasPacketLossProblem(result) { return true }
         let thresholds = latencyThresholds(for: result.host)
         return (result.latencyMs ?? result.averageMs ?? 0) >= thresholds.warning
     }
 
     private func severityColor(_ result: PingResult) -> Color {
-        if result.sent > 0 && !result.isReachable { return .red }
-        if result.packetLoss >= 0.05 { return .red }
-        if result.packetLoss > 0 { return .orange }
+        if isGateway(result) {
+            if result.sent > 0 && !result.isReachable { return .red }
+            if result.packetLoss >= state.config.packetLossCritical { return .red }
+            if result.packetLoss >= state.config.packetLossCaution { return .orange }
+        } else {
+            if result.recentLossCount >= 3 && result.packetLoss >= state.config.packetLossCritical { return .red }
+            if hasPacketLossProblem(result) { return .orange }
+        }
         let latency = result.latencyMs ?? result.averageMs ?? 0
         let thresholds = latencyThresholds(for: result.host)
         return latency >= thresholds.critical ? .red : .orange
     }
 
+    private func hasPacketLossProblem(_ result: PingResult) -> Bool {
+        if isGateway(result) {
+            return result.packetLoss >= state.config.packetLossCaution
+        }
+        return result.recentLossCount >= 2
+            && result.recentSampleCount >= 10
+            && result.packetLoss >= state.config.packetLossCaution
+    }
+
+    private func isGateway(_ result: PingResult) -> Bool {
+        result.host == state.cachedGateway
+    }
+
     private func latencyThresholds(for host: String) -> (warning: Double, critical: Double) {
         if host == state.cachedGateway {
-            return (30, 50)
+            return (state.config.gatewayLatencyCaution, state.config.gatewayLatencyCritical)
         }
-        return (100, 200)
+        return (state.config.externalLatencyCaution, state.config.externalLatencyCritical)
     }
 }
 
